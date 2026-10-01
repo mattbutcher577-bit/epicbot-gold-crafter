@@ -21,7 +21,9 @@ import java.util.List;
 public class WizardHatBuyer extends LoopScript {
 
     private static final Tile BETTY_SHOP = new Tile(3014, 3258, 0);
-    private static final Tile PORT_SARIM_DEPOSIT = new Tile(3045, 3235, 0);
+    // Stand-alone Port Sarim deposit box on the pier beside the Entrana ferry/boats.
+    // This is NOT a bank.
+    private static final Tile PORT_SARIM_DEPOSIT = new Tile(3045, 3236, 0);
 
     private static final String BLUE_HAT = "Blue wizard hat";
     // The black hat is exposed as "Wizard hat" in current OSRS shop data.
@@ -53,7 +55,7 @@ public class WizardHatBuyer extends LoopScript {
 
     @Override
     public boolean onStart(String... args) {
-        getLogger().info("Wizard Hat Buyer starting | F2P | Betty -> Port Sarim deposit box");
+        getLogger().info("Wizard Hat Buyer starting | F2P | Betty -> Port Sarim BOAT-PIER deposit box (not a bank)");
         state = State.CHECK;
         return true;
     }
@@ -259,7 +261,7 @@ public class WizardHatBuyer extends LoopScript {
             return 200;
         }
 
-        getLogger().info("Walking to Port Sarim deposit box | hats={}", hatCount(ctx));
+        getLogger().info("Walking to Port Sarim boat-pier deposit box by Entrana ferry | hats={}", hatCount(ctx));
         ctx.webWalking().walkTo(PORT_SARIM_DEPOSIT);
         return 650;
     }
@@ -336,7 +338,8 @@ public class WizardHatBuyer extends LoopScript {
             String name = o.getName();
             if (name == null) return false;
             String lower = name.toLowerCase();
-            return lower.contains("deposit box") || lower.contains("bank deposit");
+            // Only use the stand-alone deposit box by the boats; never select a bank object.
+            return lower.contains("deposit box");
         });
 
         if (boxes == null || boxes.isEmpty()) return null;
