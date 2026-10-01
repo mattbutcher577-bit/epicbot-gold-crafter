@@ -1,0 +1,8 @@
+.gradle/
+build/
+release/
+.epicbot-build/
+*.class
+*.log
+.idea/
+*.iml
