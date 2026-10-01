@@ -84,4 +84,5 @@ The relay mirrors the old Gold Profit Crafter flow:
 
 The script attempts to expose the Attack option by adjusting PK Skull Prevention / Player Attack Options through the Settings interface. This part is deliberately verified at runtime: if the Attack action still cannot be exposed, the relay waits rather than pretending the transfer succeeded.
 
-**Important:** loot keys must not redirect the dropped GP away from the ground-item flow.
+
+After the final verified pickup, the final survivor stays in the Wilderness and requests a normal logout immediately. It does not walk to Lumbridge or another bank first.
