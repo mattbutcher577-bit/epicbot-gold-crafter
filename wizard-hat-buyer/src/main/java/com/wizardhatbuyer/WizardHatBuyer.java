@@ -67,14 +67,14 @@ public class WizardHatBuyer extends LoopScript {
         APIContext ctx = getAPIContext();
 
         if (ctx.localPlayer().get() == null) {
-            return 1000;
+            return 600;
         }
 
         // User requirement: the ONLY normal stop condition is Coins == 0.
         if (ctx.inventory().getCount("Coins") <= 0) {
             getLogger().info("No Coins remain - stopping Wizard Hat Buyer");
             ctx.script().stop("Out of Coins");
-            return 1000;
+            return 600;
         }
 
         keepCoinsInFirstSlot(ctx);
@@ -103,71 +103,71 @@ public class WizardHatBuyer extends LoopScript {
         } else {
             setState(State.WALK_SHOP, "need more hats");
         }
-        return 200;
+        return 140;
     }
 
     private int walkShop(APIContext ctx) {
         if (ctx.store().isOpen()) {
             setState(State.BUY_BLUE, "shop already open");
-            return 200;
+            return 140;
         }
 
         NPC betty = findBetty(ctx);
         if (betty != null && betty.tileDistanceTo(ctx) <= 6) {
             setState(State.OPEN_SHOP, "Betty in range");
-            return 200;
+            return 140;
         }
 
         getLogger().info("Walking to Betty's Magic Emporium");
         ctx.webWalking().walkTo(BETTY_SHOP);
-        return 650;
+        return 180;
     }
 
     private int openShop(APIContext ctx) {
         if (hatCount(ctx) >= DEPOSIT_THRESHOLD) {
             setState(State.WALK_DEPOSIT, "deposit threshold reached");
-            return 200;
+            return 140;
         }
 
         if (ctx.store().isOpen()) {
             setState(State.BUY_BLUE, "shop opened");
-            return 200;
+            return 140;
         }
 
         NPC betty = findBetty(ctx);
         if (betty == null) {
             getLogger().warn("SHOP: Betty not visible yet; retrying nearby");
             setState(State.WALK_SHOP, "Betty not found");
-            return 500;
+            return 160;
         }
 
         getLogger().info("SHOP: Betty found at distance {} - opening trade", betty.tileDistanceTo(ctx));
 
         // Different client builds can expose the trade action slightly differently.
         if (betty.interact("Trade") || betty.interact("Trade-with")) {
-            return 700;
+            return 320;
         }
 
         // If the direct action fails, walk one step closer and retry rather than getting stuck.
         if (betty.tileDistanceTo(ctx) > 2) {
             ctx.webWalking().walkTo(BETTY_SHOP);
-            return 450;
+            return 220;
         }
 
         getLogger().warn("SHOP: Betty interaction failed; retrying");
-        return 500;
+        return 160;
     }
 
     private int buyBlue(APIContext ctx) {
         if (!ctx.store().isOpen()) {
             setState(State.OPEN_SHOP, "shop closed before blue purchase");
-            return 350;
+            return 140;
         }
 
         if (ctx.inventory().isFull()) {
             ctx.store().close();
             setState(State.WALK_DEPOSIT, "inventory full");
-            return 300;
+            return 180;
         }
 
         int stock = ctx.store().getCount(BLUE_HAT);
@@ -179,25 +179,25 @@ public class WizardHatBuyer extends LoopScript {
                 // Advance immediately after one purchase. Do not wait for shop stock
                 // metadata to refresh or we can repeatedly buy the same colour.
                 setState(State.BUY_BLACK, "blue purchase requested");
-                return 650;
+                return 180;
             }
-            return 400;
+            return 220;
         }
 
         setState(State.BUY_BLACK, "blue checked for this world");
-        return 150;
+        return 120;
     }
 
     private int buyBlack(APIContext ctx) {
         if (!ctx.store().isOpen()) {
             setState(State.OPEN_SHOP, "shop closed before black purchase");
-            return 350;
+            return 140;
         }
 
         if (ctx.inventory().isFull()) {
             ctx.store().close();
             setState(State.WALK_DEPOSIT, "inventory full");
-            return 300;
+            return 180;
         }
 
         String blackName = blackStoreName(ctx);
@@ -208,9 +208,9 @@ public class WizardHatBuyer extends LoopScript {
                         blackName, before, ctx.world().getCurrent());
                 ctx.store().close();
                 setState(State.HOP_WORLD, "black purchase requested; world cycle complete");
-                return 650;
+                return 180;
             }
-            return 400;
+            return 220;
         }
 
         // Finish the whole world purchase cycle before deciding whether to deposit.
@@ -225,28 +225,38 @@ public class WizardHatBuyer extends LoopScript {
         } else {
             setState(State.HOP_WORLD, "world stock checked");
         }
-        return 300;
+        return 180;
     }
 
     private int hopWorld(APIContext ctx) {
         if (hatCount(ctx) >= DEPOSIT_THRESHOLD || ctx.inventory().isFull()) {
             if (ctx.store().isOpen()) ctx.store().close();
             setState(State.WALK_DEPOSIT, "world cycle complete; inventory ready to deposit");
-            return 300;
+            return 160;
         }
 
+        // World hopping from inside the shop can silently fail on NXT.
+        // Close the shop first, then explicitly open the world switcher before requesting the hop.
         if (ctx.store().isOpen()) {
+            getLogger().info("HOP: closing shop before world switch");
             ctx.store().close();
-            return 300;
+            return 140;
         }
 
         int current = ctx.world().getCurrent();
+
+        if (!ctx.world().isWorldMenuOpen()) {
+            getLogger().info("HOP: opening world menu from world {}", current);
+            ctx.world().openWorldMenu();
+            return 180;
+        }
+
         rememberWorld(current);
 
         List<World> worlds = ctx.world().getWorlds();
         World target = null;
 
-        if (worlds != null) {
+        if (worlds != null && !worlds.isEmpty()) {
             target = worlds.stream()
                     .filter(w -> isSafeF2PWorld(w, current))
                     .sorted(Comparator.comparingInt(World::getId))
@@ -254,10 +264,9 @@ public class WizardHatBuyer extends LoopScript {
                     .orElse(null);
         }
 
-        // If our short recent-world history filtered everything, clear it and try again.
-        if (target == null && !recentWorlds.isEmpty()) {
+        if (target == null) {
             recentWorlds.clear();
-            if (worlds != null) {
+            if (worlds != null && !worlds.isEmpty()) {
                 target = worlds.stream()
                         .filter(w -> isSafeF2PWorld(w, current))
                         .sorted(Comparator.comparingInt(World::getId))
@@ -266,128 +275,134 @@ public class WizardHatBuyer extends LoopScript {
             }
         }
 
-        if (target == null) {
-            getLogger().warn("HOP: EpicBot returned no safe F2P target worlds; retrying");
-            return 1200;
-        }
-
         hopFromWorld = current;
-        hopTargetWorld = target.getId();
         hopRequestedAt = System.currentTimeMillis();
 
-        getLogger().info("HOP: requesting world {} -> {}", current, hopTargetWorld);
-
-        // Use the explicit world id. This is more reliable than predicate-based hopping
-        // on the current EpicBot NXT client.
-        if (ctx.world().hop(hopTargetWorld)) {
-            setState(State.WAIT_WORLD, "explicit F2P hop requested");
-            return 1000;
+        if (target != null) {
+            hopTargetWorld = target.getId();
+            getLogger().info("HOP: clicking world {} -> {}", current, hopTargetWorld);
+            if (ctx.world().hop(hopTargetWorld)) {
+                setState(State.WAIT_WORLD, "explicit world hop clicked");
+                return 350;
+            }
+            getLogger().warn("HOP: explicit hop to {} returned false; trying EpicBot F2P hopper", hopTargetWorld);
+        } else {
+            getLogger().warn("HOP: no explicit F2P target returned; trying EpicBot F2P hopper");
         }
 
-        getLogger().warn("HOP: request to world {} was rejected; retrying", hopTargetWorld);
+        // Fallback to EpicBot's built-in F2P selection while the world menu is already open.
         hopTargetWorld = -1;
-        return 1200;
+        if (ctx.world().hopToF2P()) {
+            setState(State.WAIT_WORLD, "built-in F2P hop clicked");
+            return 350;
+        }
+
+        getLogger().warn("HOP: both explicit and built-in F2P hop failed; reopening menu and retrying");
+        return 350;
     }
 
     private int waitWorld(APIContext ctx) {
         int current = ctx.world().getCurrent();
 
-        if (hopTargetWorld > 0 && current == hopTargetWorld) {
-            getLogger().info("HOP: arrived world {}", current);
+        if (current > 0 && current != hopFromWorld) {
+            getLogger().info("HOP SUCCESS: {} -> {}", hopFromWorld, current);
             hopTargetWorld = -1;
-            setState(State.WALK_SHOP, "target world loaded");
-            return 500;
-        }
-
-        if (current != hopFromWorld && current > 0) {
-            getLogger().info("HOP: arrived alternate world {}", current);
-            hopTargetWorld = -1;
+            hopRequestedAt = 0L;
             setState(State.WALK_SHOP, "new world loaded");
-            return 500;
+            return 220;
         }
 
-        // Never sit forever in WAIT_WORLD. Re-select a target if the hop did not occur.
-        if (hopRequestedAt > 0L && System.currentTimeMillis() - hopRequestedAt > 8_000L) {
-            getLogger().warn("HOP: still on world {} after timeout; retrying", current);
+        // If the world menu closed but the world did not change, try again quickly.
+        if (!ctx.world().isWorldMenuOpen()
+                && hopRequestedAt > 0L
+                && System.currentTimeMillis() - hopRequestedAt > 2_000L) {
+            getLogger().warn("HOP: menu closed but still on {}; retrying", current);
+            hopTargetWorld = -1;
+            setState(State.HOP_WORLD, "world unchanged");
+            return 180;
+        }
+
+        if (hopRequestedAt > 0L && System.currentTimeMillis() - hopRequestedAt > 5_000L) {
+            getLogger().warn("HOP TIMEOUT: still on world {}; retrying", current);
             hopTargetWorld = -1;
             setState(State.HOP_WORLD, "hop timeout");
-            return 500;
+            return 180;
         }
 
-        return 750;
+        return 250;
     }
 
     private int walkDeposit(APIContext ctx) {
         if (hatCount(ctx) <= 0) {
             setState(State.WALK_SHOP, "nothing to deposit");
-            return 200;
+            return 140;
         }
 
         if (ctx.bank().isOpen()) {
             setState(State.DEPOSIT_HATS, "deposit interface already open");
-            return 200;
+            return 140;
         }
 
         SceneObject box = findDepositBox(ctx);
         if (box != null && box.tileDistanceTo(ctx) <= 6) {
             setState(State.OPEN_DEPOSIT, "deposit box in range");
-            return 200;
+            return 140;
         }
 
         getLogger().info("Walking to Port Sarim boat-pier deposit box by Entrana ferry | hats={}", hatCount(ctx));
         ctx.webWalking().walkTo(PORT_SARIM_DEPOSIT);
-        return 650;
+        return 180;
     }
 
     private int openDeposit(APIContext ctx) {
         if (ctx.bank().isOpen()) {
             setState(State.DEPOSIT_HATS, "deposit box opened");
-            return 200;
+            return 140;
         }
 
         SceneObject box = findDepositBox(ctx);
         if (box == null) {
             setState(State.WALK_DEPOSIT, "deposit box not found");
-            return 500;
+            return 160;
         }
 
         if (box.interact("Deposit")) {
-            return 650;
+            return 180;
         }
 
         // Deposit interaction problems are recovery/retry conditions, never stop conditions.
-        return 500;
+        return 160;
     }
 
     private int depositHats(APIContext ctx) {
         if (!ctx.bank().isOpen()) {
             setState(State.OPEN_DEPOSIT, "deposit interface closed");
-            return 350;
+            return 140;
         }
 
         // Deposit ONLY the wizard hats. Coins are deliberately never included.
         if (ctx.inventory().getCount(BLUE_HAT) > 0) {
             getLogger().info("DEPOSIT: {} x{}", BLUE_HAT, ctx.inventory().getCount(BLUE_HAT));
             ctx.bank().depositAll(BLUE_HAT);
-            return 500;
+            return 160;
         }
 
         if (ctx.inventory().getCount(BLACK_HAT) > 0) {
             getLogger().info("DEPOSIT: {} x{}", BLACK_HAT, ctx.inventory().getCount(BLACK_HAT));
             ctx.bank().depositAll(BLACK_HAT);
-            return 500;
+            return 160;
         }
 
         if (ctx.inventory().getCount(BLACK_HAT_ALIAS) > 0) {
             getLogger().info("DEPOSIT: {} x{}", BLACK_HAT_ALIAS, ctx.inventory().getCount(BLACK_HAT_ALIAS));
             ctx.bank().depositAll(BLACK_HAT_ALIAS);
-            return 500;
+            return 160;
         }
 
         ctx.bank().close();
         keepCoinsInFirstSlot(ctx);
         setState(State.WALK_SHOP, "hats deposited; coins retained");
-        return 450;
+        return 220;
     }
 
     private NPC findBetty(APIContext ctx) {
@@ -458,14 +473,7 @@ public class WizardHatBuyer extends LoopScript {
                 && !types.contains(WorldType.DEADMAN)
                 && !types.contains(WorldType.BOUNTY)
                 && !types.contains(WorldType.PVP_ARENA)
-                && !types.contains(WorldType.LAST_MAN_STANDING)
-                && !types.contains(WorldType.QUEST_SPEEDRUNNING)
-                && !types.contains(WorldType.SKILL_TOTAL)
-                && !types.contains(WorldType.BETA_WORLD)
-                && !types.contains(WorldType.TOURNAMENT_WORLD)
-                && !types.contains(WorldType.FRESH_START_WORLD)
-                && !types.contains(WorldType.SEASONAL)
-                && !types.contains(WorldType.NOSAVE_MODE);
+                && !types.contains(WorldType.LAST_MAN_STANDING);
     }
 
     private void rememberWorld(int world) {
