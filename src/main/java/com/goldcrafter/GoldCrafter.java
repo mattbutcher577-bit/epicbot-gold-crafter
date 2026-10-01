@@ -845,7 +845,6 @@ public class GoldCrafter extends LoopScript {
 
         if ("DONE".equals(cmd.phase)) {
             if (cmd.id.equals(activeMuleCommandId)) {
-                String account = safeAccountName(ctx);
                 lastFinishedMuleCommandId = cmd.id;
 
                 if (account.equalsIgnoreCase(cmd.finalSurvivor)) {
