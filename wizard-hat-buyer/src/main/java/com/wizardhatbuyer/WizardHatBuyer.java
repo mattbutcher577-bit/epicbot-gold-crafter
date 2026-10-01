@@ -134,15 +134,25 @@ public class WizardHatBuyer extends LoopScript {
 
         NPC betty = findBetty(ctx);
         if (betty == null) {
+            getLogger().warn("SHOP: Betty not visible yet; retrying nearby");
             setState(State.WALK_SHOP, "Betty not found");
             return 500;
         }
 
-        if (betty.interact("Trade")) {
+        getLogger().info("SHOP: Betty found at distance {} - opening trade", betty.tileDistanceTo(ctx));
+
+        // Different client builds can expose the trade action slightly differently.
+        if (betty.interact("Trade") || betty.interact("Trade-with")) {
             return 700;
         }
 
-        // Shop opening problems are recovery/retry conditions, never stop conditions.
+        // If the direct action fails, walk one step closer and retry rather than getting stuck.
+        if (betty.tileDistanceTo(ctx) > 2) {
+            ctx.walking().walkTo(betty.getTile());
+            return 450;
+        }
+
+        getLogger().warn("SHOP: Betty interaction failed; retrying");
         return 500;
     }
 
@@ -318,12 +328,13 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private NPC findBetty(APIContext ctx) {
+        // Do not require hasAction("Trade") here. Some EpicBot/NXT builds do not
+        // populate NPC action metadata until interaction time even though Betty is visible.
         List<NPC> npcs = ctx.npcs().getAll(n ->
                 n != null
                         && n.isValid()
                         && n.getName() != null
-                        && n.getName().equalsIgnoreCase("Betty")
-                        && n.hasAction("Trade"));
+                        && n.getName().equalsIgnoreCase("Betty"));
 
         if (npcs == null || npcs.isEmpty()) return null;
 
