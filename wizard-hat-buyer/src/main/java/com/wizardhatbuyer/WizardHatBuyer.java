@@ -148,7 +148,7 @@ public class WizardHatBuyer extends LoopScript {
 
         // If the direct action fails, walk one step closer and retry rather than getting stuck.
         if (betty.tileDistanceTo(ctx) > 2) {
-            ctx.walking().walkTo(betty.getTile());
+            ctx.webWalking().walkTo(BETTY_SHOP);
             return 450;
         }
 
