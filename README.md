@@ -41,3 +41,5 @@ The build helper can install Temurin Java 21 with winget when it is missing.
 
 EpicBot developer docs: https://docs.epicbot.com/docs/developer/
 EpicBot API docs: https://api.epicbot.com/javadoc/
+
+GitHub Actions compiles the script against the current public EpicBot template on every push.
