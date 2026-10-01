@@ -79,6 +79,7 @@ public class GoldCrafter extends LoopScript {
     private int muleBaselineRound = -1;
     private int muleBaselineCoins;
     private int muleSettingAttempts;
+    private boolean finalMuleLogoutRequested;
 
     private final MuleCoordinator mule = new MuleCoordinator();
 
@@ -844,9 +845,34 @@ public class GoldCrafter extends LoopScript {
 
         if ("DONE".equals(cmd.phase)) {
             if (cmd.id.equals(activeMuleCommandId)) {
+                String account = safeAccountName(ctx);
                 lastFinishedMuleCommandId = cmd.id;
-                getLogger().info("MULE: relay complete | survivor={} | command={}", cmd.finalSurvivor, cmd.id);
-                ctx.script().stop("Mule relay complete; combined GP is on " + cmd.finalSurvivor);
+
+                if (account.equalsIgnoreCase(cmd.finalSurvivor)) {
+                    int coins = ctx.inventory().getCount("Coins");
+                    if (!ctx.localPlayer().isInWilderness()) {
+                        getLogger().warn("MULE: final survivor is no longer in Wilderness; refusing to walk anywhere before logout");
+                        ctx.script().stop("Mule relay complete; final survivor left Wilderness unexpectedly");
+                        return;
+                    }
+
+                    if (coins <= 0) {
+                        getLogger().warn("MULE: final survivor has no verified GP stack; not claiming mule completion");
+                        return;
+                    }
+
+                    if (!finalMuleLogoutRequested) {
+                        getLogger().info("MULE: final survivor {} has {} GP - logging out in Wilderness", account, coins);
+                        finalMuleLogoutRequested = ctx.game().logout();
+                    }
+
+                    if (finalMuleLogoutRequested) {
+                        ctx.script().stop("Mule relay complete; final survivor logout requested in Wilderness");
+                    }
+                } else {
+                    getLogger().info("MULE: relay complete | final survivor={} | this worker={}", cmd.finalSurvivor, account);
+                    ctx.script().stop("Mule relay complete; this worker is not the final survivor");
+                }
             }
             return;
         }
@@ -870,6 +896,7 @@ public class GoldCrafter extends LoopScript {
             mulePickedRound = -1;
             muleBaselineRound = -1;
             muleSettingAttempts = 0;
+            finalMuleLogoutRequested = false;
             muleLiquidationMode = true;
             getLogger().info("MULE: command {} received - liquidating finished jewellery", cmd.id);
             setState(State.MULE_PREPARE, "mule command received");
@@ -1086,6 +1113,14 @@ public class GoldCrafter extends LoopScript {
         mule.maybeAdvance(safeAccountName(ctx));
 
         if ("DONE".equals(cmd.phase)) {
+            String account = safeAccountName(ctx);
+            if (account.equalsIgnoreCase(cmd.finalSurvivor)
+                    && ctx.localPlayer().isInWilderness()
+                    && ctx.inventory().getCount("Coins") > 0) {
+                getLogger().info("MULE: final survivor {} logging out in Wilderness with {} GP",
+                        account, ctx.inventory().getCount("Coins"));
+                ctx.game().logout();
+            }
             ctx.script().stop("Mule relay complete");
             return -1;
         }
@@ -1212,6 +1247,7 @@ public class GoldCrafter extends LoopScript {
         muleBaselineRound = -1;
         muleLiquidationMode = false;
         muleSettingAttempts = 0;
+        finalMuleLogoutRequested = false;
     }
 
     private String safeAccountName(APIContext ctx) {
