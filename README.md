@@ -43,3 +43,45 @@ EpicBot developer docs: https://docs.epicbot.com/docs/developer/
 EpicBot API docs: https://api.epicbot.com/javadoc/
 
 GitHub Actions compiles the script against the current public EpicBot template on every push.
+
+
+## Automatic profit selection
+
+With no product argument, the script reads the account's real Crafting level and compares every jewellery recipe the account can make. It estimates aggressive buy prices, sale proceeds after the current 2% GE tax, and batch profit, then selects the highest positive estimated batch profit.
+
+Supported level gates:
+
+- Gold ring 5, necklace 6, amulet (u) 8
+- Sapphire ring 20, necklace 22, amulet (u) 24
+- Emerald ring 27, necklace 29, amulet (u) 31
+- Ruby ring 34, necklace 40, amulet (u) 50
+- Diamond ring 43, necklace 56, amulet (u) 70
+
+Passing a product name as a script argument locks the script to that product instead.
+
+## Wilderness mule relay
+
+Run \`mule-now.cmd\` while two or more Gold Crafter workers are running on the same Windows account.
+
+The workers share state under:
+
+\`\`\`
+%USERPROFILE%\.epicbot\gold-crafter\mule
+\`\`\`
+
+The relay mirrors the old Gold Profit Crafter flow:
+
+1. Every worker liquidates finished jewellery.
+2. Every remaining GP stack is withdrawn from the bank.
+3. Workers hop to world 698.
+4. They rendezvous behind the Varrock sawmill at tile 3302,3555 (Wilderness level 5).
+5. The coordinator checks that adjacent workers are within 5 combat levels.
+6. Exactly one loser/collector pair acts per round.
+7. The loser attacks first; the collector retaliates.
+8. The collector takes the dropped Coins.
+9. The next round starts only after the collector's coin stack is verified to have increased.
+10. After the last verified pickup, the scripts stop and the combined GP remains on the final survivor.
+
+The script attempts to expose the Attack option by adjusting PK Skull Prevention / Player Attack Options through the Settings interface. This part is deliberately verified at runtime: if the Attack action still cannot be exposed, the relay waits rather than pretending the transfer succeeded.
+
+**Important:** loot keys must not redirect the dropped GP away from the ground-item flow.
