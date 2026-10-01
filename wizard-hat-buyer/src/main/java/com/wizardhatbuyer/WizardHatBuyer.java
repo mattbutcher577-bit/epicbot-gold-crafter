@@ -206,7 +206,6 @@ public class WizardHatBuyer extends LoopScript {
             if (ctx.store().buyOne(blackName)) {
                 getLogger().info("BUY: {} | before={} | world={}",
                         blackName, before, ctx.world().getCurrent());
-                ctx.store().close();
                 setState(State.HOP_WORLD, "black purchase requested; world cycle complete");
                 return 180;
             }
@@ -230,25 +229,28 @@ public class WizardHatBuyer extends LoopScript {
 
     private int hopWorld(APIContext ctx) {
         if (hatCount(ctx) >= DEPOSIT_THRESHOLD || ctx.inventory().isFull()) {
-            if (ctx.store().isOpen()) ctx.store().close();
+            if (ctx.store().isOpen() && !ctx.world().isWorldMenuOpen()) ctx.store().close();
             setState(State.WALK_DEPOSIT, "world cycle complete; inventory ready to deposit");
-            return 160;
-        }
-
-        // World hopping from inside the shop can silently fail on NXT.
-        // Close the shop first, then explicitly open the world switcher before requesting the hop.
-        if (ctx.store().isOpen()) {
-            getLogger().info("HOP: closing shop before world switch");
-            ctx.store().close();
             return 140;
         }
 
         int current = ctx.world().getCurrent();
 
-        if (!ctx.world().isWorldMenuOpen()) {
+        // IMPORTANT: once the world switcher is visible, ignore ctx.store().isOpen().
+        // EpicBot NXT can leave the shop-open flag stale after closing Betty's shop.
+        // The previous build kept calling store.close() forever even though the
+        // world switcher was already on screen.
+        if (ctx.world().isWorldMenuOpen()) {
+            getLogger().info("HOP: world menu ready on world {}", current);
+        } else {
+            if (ctx.store().isOpen()) {
+                getLogger().info("HOP: closing shop once before world switch");
+                ctx.store().close();
+            }
+
             getLogger().info("HOP: opening world menu from world {}", current);
             ctx.world().openWorldMenu();
-            return 180;
+            return 140;
         }
 
         rememberWorld(current);
@@ -283,7 +285,7 @@ public class WizardHatBuyer extends LoopScript {
             getLogger().info("HOP: clicking world {} -> {}", current, hopTargetWorld);
             if (ctx.world().hop(hopTargetWorld)) {
                 setState(State.WAIT_WORLD, "explicit world hop clicked");
-                return 350;
+                return 220;
             }
             getLogger().warn("HOP: explicit hop to {} returned false; trying EpicBot F2P hopper", hopTargetWorld);
         } else {
@@ -315,14 +317,14 @@ public class WizardHatBuyer extends LoopScript {
         // If the world menu closed but the world did not change, try again quickly.
         if (!ctx.world().isWorldMenuOpen()
                 && hopRequestedAt > 0L
-                && System.currentTimeMillis() - hopRequestedAt > 2_000L) {
+                && System.currentTimeMillis() - hopRequestedAt > 1_500L) {
             getLogger().warn("HOP: menu closed but still on {}; retrying", current);
             hopTargetWorld = -1;
             setState(State.HOP_WORLD, "world unchanged");
             return 180;
         }
 
-        if (hopRequestedAt > 0L && System.currentTimeMillis() - hopRequestedAt > 5_000L) {
+        if (hopRequestedAt > 0L && System.currentTimeMillis() - hopRequestedAt > 3_500L) {
             getLogger().warn("HOP TIMEOUT: still on world {}; retrying", current);
             hopTargetWorld = -1;
             setState(State.HOP_WORLD, "hop timeout");
