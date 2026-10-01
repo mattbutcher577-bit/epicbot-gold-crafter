@@ -48,8 +48,10 @@ public class GoldCrafter extends LoopScript {
     private static final int TARGET_GEMS = 500;
     private static final int SELL_AT = 100;
 
-    private static final double BUY_MULTIPLIER = 1.03;
-    private static final double SELL_MULTIPLIER = 0.97;
+    // EpicBot pricing high/low values already represent the current instant-buy / instant-sell market.
+    // Do not add another 3% penalty when comparing or placing offers; that was biasing gem recipes downward.
+    private static final double BUY_MULTIPLIER = 1.00;
+    private static final double SELL_MULTIPLIER = 1.00;
     private static final double GE_TAX_RATE = 0.02;
     private static final long GE_TIMEOUT_MS = 90_000L;
 
@@ -408,25 +410,37 @@ public class GoldCrafter extends LoopScript {
     }
 
     private int selectProduct(APIContext ctx) {
+        // Never click a grey/unavailable recipe. A gem recipe must have its gem in inventory.
+        if (!hasCraftBatch(ctx)) {
+            getLogger().warn("CRAFT: selected {} but required inputs are no longer in inventory; returning to bank",
+                    product.output);
+            setState(State.WALK_BANK, "selected recipe inputs missing");
+            return 300;
+        }
+
         WidgetChild widget = findCraftWidget(ctx);
         if (widget == null) {
             interfaceFailures++;
             if (interfaceFailures >= 6) {
                 interfaceFailures = 0;
-                setState(State.OPEN_FURNACE, "craft interface not found");
+                setState(State.OPEN_FURNACE, "exact recipe widget not found");
             }
             return 450;
         }
 
         barsBeforeCraft = ctx.inventory().getCount("Gold bar");
 
-        if (interactMakeAll(widget)) {
+        if (interactExactProduct(widget)) {
             lastCraftProgress = System.currentTimeMillis();
-            setState(State.CRAFTING, "Make-All started");
+            getLogger().info("CRAFT: exact recipe selected {} | bars={}{}",
+                    product.output,
+                    ctx.inventory().getCount("Gold bar"),
+                    product.usesGem() ? " | " + product.gem + "=" + ctx.inventory().getCount(product.gem) : "");
+            setState(State.CRAFTING, "exact recipe started");
             return 700;
         }
 
-        setState(State.OPEN_FURNACE, "Make-All failed");
+        setState(State.OPEN_FURNACE, "exact recipe interaction failed");
         return 500;
     }
 
@@ -660,42 +674,62 @@ public class GoldCrafter extends LoopScript {
     private Product selectBestProduct(APIContext ctx) {
         int craftingLevel = ctx.skills().crafting().getRealLevel();
         int barBuy = quickBuyPrice(ctx, "Gold bar");
-        if (barBuy <= 0) return null;
+        if (barBuy <= 0) {
+            getLogger().warn("PROFIT: no Gold bar buy price; cannot compare recipes");
+            return null;
+        }
 
         Product best = null;
-        long bestBatchProfit = Long.MIN_VALUE;
         int bestItemProfit = Integer.MIN_VALUE;
+        long bestBatchProfit = Long.MIN_VALUE;
 
         for (Product candidate : Product.values()) {
+            // F2P-only enum: rings, necklaces and amulets. Bracelets are intentionally absent.
             if (craftingLevel < candidate.requiredLevel) continue;
 
             int sell = quickSellPrice(ctx, candidate.output);
-            if (sell <= 0) continue;
-
-            int input = barBuy;
-            if (candidate.usesGem()) {
-                int gemBuy = quickBuyPrice(ctx, candidate.gem);
-                if (gemBuy <= 0) continue;
-                input += gemBuy;
+            if (sell <= 0) {
+                getLogger().info("PROFIT: SKIP {} | no sell price", candidate.output);
+                continue;
             }
 
-            int netSell = sell - geTaxPerItem(sell);
+            int gemBuy = 0;
+            if (candidate.usesGem()) {
+                gemBuy = quickBuyPrice(ctx, candidate.gem);
+                if (gemBuy <= 0) {
+                    getLogger().info("PROFIT: SKIP {} | no {} buy price", candidate.output, candidate.gem);
+                    continue;
+                }
+            }
+
+            int input = barBuy + gemBuy;
+            int tax = geTaxPerItem(sell);
+            int netSell = sell - tax;
             int itemProfit = netSell - input;
             long batchProfit = (long) itemProfit * candidate.barsPerBatch();
 
-            getLogger().debug("PROFIT {} lvl={} net/item={} batch={}",
-                    candidate.output, candidate.requiredLevel, itemProfit, batchProfit);
+            getLogger().info(
+                    "PROFIT: {} | req={} | sell={} | tax={} | bar={} | gem={} | net/item={} | batch={}",
+                    candidate.output, candidate.requiredLevel, sell, tax, barBuy, gemBuy, itemProfit, batchProfit
+            );
 
-            if (itemProfit > 0 && batchProfit > bestBatchProfit) {
+            // Match the older Gold Profit Crafter behaviour: choose the highest eligible NET GP PER ITEM.
+            // Batch profit was wrong here because plain-gold batches hold 27 items while gem batches hold 13,
+            // which unfairly made plain gold win even when sapphire/emerald made much more per crafted item.
+            if (itemProfit > 0
+                    && (itemProfit > bestItemProfit
+                    || (itemProfit == bestItemProfit && batchProfit > bestBatchProfit))) {
                 best = candidate;
-                bestBatchProfit = batchProfit;
                 bestItemProfit = itemProfit;
+                bestBatchProfit = batchProfit;
             }
         }
 
         if (best != null) {
-            getLogger().info("PROFIT: Crafting {} -> {} | net/item={} | est batch={}",
+            getLogger().info("PROFIT SELECTED: Crafting {} -> {} | {} gp/item | est batch {} gp",
                     craftingLevel, best.output, bestItemProfit, bestBatchProfit);
+        } else {
+            getLogger().warn("PROFIT: no positive-profit F2P recipe available at Crafting {}", craftingLevel);
         }
 
         return best;
@@ -772,44 +806,64 @@ public class GoldCrafter extends LoopScript {
         String expected = normalize(product.output);
 
         List<WidgetChild> widgets = ctx.widgets().getAllChildren(w ->
-                w != null
-                        && w.isValid()
-                        && w.isVisible()
-                        && (
-                        normalize(w.getName()).contains(expected)
-                                || normalize(w.getText()).contains(expected)
-                                || normalize(w.getRawText()).contains(expected)
-                )
+                w != null && w.isValid() && w.isVisible()
         );
 
         if (widgets == null || widgets.isEmpty()) return null;
 
+        // Primary match: the actual jewellery interface exposes actions such as
+        // "Make <col=ff9040>Sapphire necklace</col>". Match that exact recipe name.
         for (WidgetChild widget : widgets) {
-            if (widget.hasActionMatch("(?i).*make.*")) return widget;
+            List<String> actions = widget.getActions();
+            if (actions == null) continue;
+
+            for (String action : actions) {
+                String normalizedAction = normalize(action);
+                if (normalizedAction.contains("make") && normalizedAction.contains(expected)) {
+                    getLogger().debug("CRAFT widget action matched exact recipe: {}", normalizedAction);
+                    return widget;
+                }
+            }
         }
 
-        return widgets.get(0);
+        // Fallback only when the widget itself explicitly names the selected product.
+        for (WidgetChild widget : widgets) {
+            if (normalize(widget.getName()).contains(expected)
+                    || normalize(widget.getText()).contains(expected)
+                    || normalize(widget.getRawText()).contains(expected)) {
+                return widget;
+            }
+        }
+
+        return null;
     }
 
-    private boolean interactMakeAll(WidgetChild widget) {
+    private boolean interactExactProduct(WidgetChild widget) {
+        String expected = normalize(product.output);
         List<String> actions = widget.getActions();
+
         if (actions != null) {
             for (String action : actions) {
                 if (action == null) continue;
-                String lower = action.toLowerCase(Locale.ROOT);
-                if (lower.contains("make") && lower.contains("all")) {
-                    return widget.interact(action);
-                }
-            }
+                String normalizedAction = normalize(action);
 
-            for (String action : actions) {
-                if (action != null && action.toLowerCase(Locale.ROOT).contains("make")) {
+                // Never use a generic Make action from a neighbouring grey necklace slot.
+                if (normalizedAction.contains("make") && normalizedAction.contains(expected)) {
+                    getLogger().info("CRAFT: interacting exact action '{}'", normalizedAction);
                     return widget.interact(action);
                 }
             }
         }
 
-        return widget.click();
+        // Safe fallback: click only if the widget itself explicitly identifies our exact product.
+        if (normalize(widget.getName()).contains(expected)
+                || normalize(widget.getText()).contains(expected)
+                || normalize(widget.getRawText()).contains(expected)) {
+            return widget.click();
+        }
+
+        getLogger().warn("CRAFT: refused generic/ambiguous Make action for {}", product.output);
+        return false;
     }
 
     private boolean hasCraftBatch(APIContext ctx) {
