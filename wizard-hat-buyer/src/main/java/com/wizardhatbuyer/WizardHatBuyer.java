@@ -39,6 +39,8 @@ public class WizardHatBuyer extends LoopScript {
     private final Deque<Integer> recentWorlds = new ArrayDeque<>();
     private State state = State.CHECK;
     private int hopFromWorld = -1;
+    private int hopTargetWorld = -1;
+    private long hopRequestedAt = 0L;
 
     private enum State {
         CHECK,
@@ -174,6 +176,9 @@ public class WizardHatBuyer extends LoopScript {
             if (ctx.store().buyOne(BLUE_HAT)) {
                 getLogger().info("BUY: {} | before={} | world={}",
                         BLUE_HAT, before, ctx.world().getCurrent());
+                // Advance immediately after one purchase. Do not wait for shop stock
+                // metadata to refresh or we can repeatedly buy the same colour.
+                setState(State.BUY_BLACK, "blue purchase requested");
                 return 650;
             }
             return 400;
@@ -201,6 +206,8 @@ public class WizardHatBuyer extends LoopScript {
             if (ctx.store().buyOne(blackName)) {
                 getLogger().info("BUY: {} | before={} | world={}",
                         blackName, before, ctx.world().getCurrent());
+                ctx.store().close();
+                setState(State.HOP_WORLD, "black purchase requested; world cycle complete");
                 return 650;
             }
             return 400;
@@ -222,32 +229,88 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private int hopWorld(APIContext ctx) {
+        if (hatCount(ctx) >= DEPOSIT_THRESHOLD || ctx.inventory().isFull()) {
+            if (ctx.store().isOpen()) ctx.store().close();
+            setState(State.WALK_DEPOSIT, "world cycle complete; inventory ready to deposit");
+            return 300;
+        }
+
         if (ctx.store().isOpen()) {
             ctx.store().close();
-            return 250;
+            return 300;
         }
 
         int current = ctx.world().getCurrent();
         rememberWorld(current);
-        hopFromWorld = current;
 
-        boolean requested = ctx.world().hop(world -> isSafeF2PWorld(world, current));
-        if (requested) {
-            getLogger().info("HOP: leaving F2P world {}", current);
-            setState(State.WAIT_WORLD, "hop requested");
+        List<World> worlds = ctx.world().getWorlds();
+        World target = null;
+
+        if (worlds != null) {
+            target = worlds.stream()
+                    .filter(w -> isSafeF2PWorld(w, current))
+                    .sorted(Comparator.comparingInt(World::getId))
+                    .findFirst()
+                    .orElse(null);
+        }
+
+        // If our short recent-world history filtered everything, clear it and try again.
+        if (target == null && !recentWorlds.isEmpty()) {
+            recentWorlds.clear();
+            if (worlds != null) {
+                target = worlds.stream()
+                        .filter(w -> isSafeF2PWorld(w, current))
+                        .sorted(Comparator.comparingInt(World::getId))
+                        .findFirst()
+                        .orElse(null);
+            }
+        }
+
+        if (target == null) {
+            getLogger().warn("HOP: EpicBot returned no safe F2P target worlds; retrying");
+            return 1200;
+        }
+
+        hopFromWorld = current;
+        hopTargetWorld = target.getId();
+        hopRequestedAt = System.currentTimeMillis();
+
+        getLogger().info("HOP: requesting world {} -> {}", current, hopTargetWorld);
+
+        // Use the explicit world id. This is more reliable than predicate-based hopping
+        // on the current EpicBot NXT client.
+        if (ctx.world().hop(hopTargetWorld)) {
+            setState(State.WAIT_WORLD, "explicit F2P hop requested");
             return 1000;
         }
 
-        // Hop failure is explicitly recoverable.
-        getLogger().warn("HOP: no safe F2P world selected; retrying");
+        getLogger().warn("HOP: request to world {} was rejected; retrying", hopTargetWorld);
+        hopTargetWorld = -1;
         return 1200;
     }
 
     private int waitWorld(APIContext ctx) {
         int current = ctx.world().getCurrent();
-        if (current != hopFromWorld && current > 0) {
+
+        if (hopTargetWorld > 0 && current == hopTargetWorld) {
             getLogger().info("HOP: arrived world {}", current);
+            hopTargetWorld = -1;
+            setState(State.WALK_SHOP, "target world loaded");
+            return 500;
+        }
+
+        if (current != hopFromWorld && current > 0) {
+            getLogger().info("HOP: arrived alternate world {}", current);
+            hopTargetWorld = -1;
             setState(State.WALK_SHOP, "new world loaded");
+            return 500;
+        }
+
+        // Never sit forever in WAIT_WORLD. Re-select a target if the hop did not occur.
+        if (hopRequestedAt > 0L && System.currentTimeMillis() - hopRequestedAt > 8_000L) {
+            getLogger().warn("HOP: still on world {} after timeout; retrying", current);
+            hopTargetWorld = -1;
+            setState(State.HOP_WORLD, "hop timeout");
             return 500;
         }
 
