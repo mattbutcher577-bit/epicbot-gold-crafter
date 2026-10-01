@@ -180,7 +180,7 @@ public class GoldCrafter extends LoopScript {
             return 250;
         }
 
-        if (ctx.localPlayer().getLocation().tileDistanceTo(EDGEVILLE_BANK) <= 6) {
+        if (EDGEVILLE_BANK.tileDistanceTo(ctx) <= 6) {
             setState(State.OPEN_BANK, "at Edgeville bank");
             return 200;
         }
@@ -310,7 +310,7 @@ public class GoldCrafter extends LoopScript {
         }
 
         SceneObject furnace = findFurnace(ctx);
-        if (furnace != null && furnace.tileDistanceTo(ctx.localPlayer().getLocation()) <= 5) {
+        if (furnace != null && furnace.tileDistanceTo(ctx) <= 5) {
             setState(State.OPEN_FURNACE, "furnace in range");
             return 200;
         }
@@ -414,7 +414,7 @@ public class GoldCrafter extends LoopScript {
     }
 
     private int walkGe(APIContext ctx) {
-        if (ctx.localPlayer().getLocation().tileDistanceTo(GRAND_EXCHANGE) <= 9) {
+        if (GRAND_EXCHANGE.tileDistanceTo(ctx) <= 9) {
             setState(State.GE_OPEN, "at GE");
             return 250;
         }
@@ -610,7 +610,7 @@ public class GoldCrafter extends LoopScript {
 
         Tile player = ctx.localPlayer().getLocation();
         return furnaces.stream()
-                .min(Comparator.comparingInt(o -> o.tileDistanceTo(player)))
+                .min(Comparator.comparingInt(o -> o.tileDistanceTo(ctx)))
                 .orElse(null);
     }
 
