@@ -1,0 +1,86 @@
+name: Build EpicBot Wizard Hat Buyer
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "wizard-hat-buyer/**"
+      - ".github/workflows/build-wizard-hat-buyer.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Clone official EpicBot script template
+        run: |
+          git clone --depth 1 https://gitlab.epicbot.com/epicbot-public/epicbot-script-template.git .epicbot-wizard-template
+
+      - name: Inject Wizard Hat Buyer source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          JAVA_DIR=""
+          while IFS= read -r d; do
+            if grep -R -q -E "ScriptManifest|LoopScript|TreeScript" "$d" 2>/dev/null; then
+              JAVA_DIR="$d"
+              break
+            fi
+          done < <(find .epicbot-wizard-template -type d -path "*/src/main/java")
+
+          if [ -z "$JAVA_DIR" ]; then
+            JAVA_DIR="$(find .epicbot-wizard-template -type d -path "*/src/main/java" | head -n 1)"
+          fi
+
+          if [ -z "$JAVA_DIR" ]; then
+            echo "No src/main/java directory found in EpicBot template"
+            exit 1
+          fi
+
+          echo "Using template source directory: $JAVA_DIR"
+          find "$JAVA_DIR" -type f -name "*.java" -delete
+          mkdir -p "$JAVA_DIR/com/wizardhatbuyer"
+          cp wizard-hat-buyer/src/main/java/com/wizardhatbuyer/WizardHatBuyer.java              "$JAVA_DIR/com/wizardhatbuyer/WizardHatBuyer.java"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .epicbot-wizard-template
+          chmod +x gradlew
+          ./gradlew clean build --stacktrace
+
+      - name: Collect JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          mapfile -t JARS < <(
+            find .epicbot-wizard-template -type f -path "*/build/libs/*.jar"               ! -name "*sources*"               ! -name "*javadoc*"               ! -name "*plain*"
+          )
+
+          if [ "${#JARS[@]}" -eq 0 ]; then
+            echo "Build completed but no script JAR was found"
+            exit 1
+          fi
+
+          printf '%s\n' "${JARS[@]}"
+          cp "${JARS[-1]}" release/WizardHatBuyer.jar
+
+      - name: Upload Wizard Hat Buyer JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: WizardHatBuyer
+          path: release/WizardHatBuyer.jar
