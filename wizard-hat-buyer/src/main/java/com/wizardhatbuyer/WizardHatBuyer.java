@@ -5,11 +5,13 @@ import com.epicbot.api.shared.GameType;
 import com.epicbot.api.shared.entity.ItemWidget;
 import com.epicbot.api.shared.entity.NPC;
 import com.epicbot.api.shared.entity.SceneObject;
+import com.epicbot.api.shared.entity.WidgetGroup;
 import com.epicbot.api.shared.model.Tile;
 import com.epicbot.api.shared.model.World;
 import com.epicbot.api.shared.model.WorldType;
 import com.epicbot.api.shared.script.LoopScript;
 import com.epicbot.api.shared.script.ScriptManifest;
+import com.epicbot.api.os.model.game.WidgetID;
 
 import java.util.ArrayDeque;
 import java.util.Comparator;
@@ -146,7 +148,14 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private int check(APIContext ctx) {
-        if (hatCount(ctx) >= DEPOSIT_THRESHOLD) {
+        int hats = hatCount(ctx);
+        int coins = ctx.inventory().getCount("Coins");
+        if (!inventorySnapshotReady(coins, hats)) {
+            getLogger().debug("CHECK: waiting for inventory snapshot before routing");
+            return 250;
+        }
+
+        if (hats >= DEPOSIT_THRESHOLD) {
             setState(State.WALK_DEPOSIT, "inventory ready to deposit");
         } else {
             setState(State.WALK_SHOP, "need more hats");
@@ -603,11 +612,23 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private boolean depositInterfaceReady(APIContext ctx) {
-        return isDepositInterfaceReady(ctx.bank().isOpen(), ctx.bank().isVisible());
+        WidgetGroup depositBox = ctx.widgets().get(WidgetID.DEPOSIT_BOX_GROUP_ID);
+        boolean depositWidgetVisible = depositBox != null && depositBox.isVisible();
+        return isDepositInterfaceReady(
+                ctx.bank().isOpen(),
+                ctx.bank().isVisible(),
+                depositWidgetVisible);
     }
 
-    static boolean isDepositInterfaceReady(boolean bankOpen, boolean bankVisible) {
-        return bankOpen || bankVisible;
+    static boolean isDepositInterfaceReady(
+            boolean bankOpen,
+            boolean bankVisible,
+            boolean depositWidgetVisible) {
+        return bankOpen || bankVisible || depositWidgetVisible;
+    }
+
+    static boolean inventorySnapshotReady(int coins, int hats) {
+        return coins > 0 || hats > 0;
     }
 
     private int blackHatCount(APIContext ctx) {
