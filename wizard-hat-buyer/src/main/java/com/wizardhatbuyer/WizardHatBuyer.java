@@ -41,6 +41,7 @@ public class WizardHatBuyer extends LoopScript {
     private int hopFromWorld = -1;
     private int hopTargetWorld = -1;
     private long hopRequestedAt = 0L;
+    private long hopArrivedAt = 0L;
     private long lastHopActivityAt = 0L;
     private long scriptStartedAt = 0L;
     private int zeroCoinStableChecks = 0;
@@ -317,56 +318,78 @@ public class WizardHatBuyer extends LoopScript {
             getLogger().info("HOP: clicking world {} -> {}", current, hopTargetWorld);
             if (ctx.world().hop(hopTargetWorld)) {
                 lastHopActivityAt = System.currentTimeMillis();
+                hopArrivedAt = 0L;
                 setState(State.WAIT_WORLD, "explicit world hop clicked");
                 return 220;
             }
-            getLogger().warn("HOP: explicit hop to {} returned false; trying EpicBot F2P hopper", hopTargetWorld);
-        } else {
-            getLogger().warn("HOP: no explicit F2P target returned; trying EpicBot F2P hopper");
+
+            // IMPORTANT: do NOT call hopToF2P() here.
+            // EpicBot NXT's built-in F2P hopper can close/replace the current script instance.
+            // Mark this target as temporarily skipped and try another explicit F2P world next loop.
+            getLogger().warn("HOP: explicit hop to {} returned false; trying a different F2P world", hopTargetWorld);
+            rememberWorld(hopTargetWorld);
+            hopTargetWorld = -1;
+            return 180;
         }
 
-        // Fallback to EpicBot's built-in F2P selection while the world menu is already open.
-        hopTargetWorld = -1;
-        if (ctx.world().hopToF2P()) {
-            lastHopActivityAt = System.currentTimeMillis();
-            setState(State.WAIT_WORLD, "built-in F2P hop clicked");
-            return 350;
-        }
-
-        getLogger().warn("HOP: both explicit and built-in F2P hop failed; reopening menu and retrying");
-        return 350;
+        getLogger().warn("HOP: no explicit safe F2P target available; clearing recent list and retrying");
+        recentWorlds.clear();
+        return 220;
     }
 
     private int waitWorld(APIContext ctx) {
         int current = ctx.world().getCurrent();
+        long now = System.currentTimeMillis();
 
         if (current > 0 && current != hopFromWorld) {
-            getLogger().info("HOP SUCCESS: {} -> {}", hopFromWorld, current);
-            lastHopActivityAt = System.currentTimeMillis();
-            hopTargetWorld = -1;
-            hopRequestedAt = 0L;
-            setState(State.WALK_SHOP, "new world loaded");
-            return 220;
+            if (hopArrivedAt == 0L) {
+                hopArrivedAt = now;
+                lastHopActivityAt = now;
+                getLogger().info("HOP SUCCESS: {} -> {} | waiting for inventory to settle", hopFromWorld, current);
+                return 180;
+            }
+
+            int coins = ctx.inventory().getCount("Coins");
+            if (coins > 0 || now - hopArrivedAt >= 4_000L) {
+                if (coins > 0) {
+                    getLogger().info("HOP READY: world {} loaded | coins visible={}", current, coins);
+                } else {
+                    getLogger().warn("HOP READY: world {} loaded but coins still not visible after settle timeout", current);
+                }
+
+                hopTargetWorld = -1;
+                hopRequestedAt = 0L;
+                hopArrivedAt = 0L;
+                setState(State.WALK_SHOP, "new world stable");
+                return 160;
+            }
+
+            getLogger().debug("HOP: waiting for inventory on world {}", current);
+            return 160;
         }
 
-        // If the world menu closed but the world did not change, try again quickly.
+        // If the world menu closed but the world did not change, try another explicit target quickly.
         if (!ctx.world().isWorldMenuOpen()
                 && hopRequestedAt > 0L
-                && System.currentTimeMillis() - hopRequestedAt > 1_500L) {
-            getLogger().warn("HOP: menu closed but still on {}; retrying", current);
+                && now - hopRequestedAt > 1_500L) {
+            getLogger().warn("HOP: menu closed but still on {}; retrying another world", current);
+            if (hopTargetWorld > 0) rememberWorld(hopTargetWorld);
             hopTargetWorld = -1;
+            hopArrivedAt = 0L;
             setState(State.HOP_WORLD, "world unchanged");
-            return 180;
+            return 160;
         }
 
-        if (hopRequestedAt > 0L && System.currentTimeMillis() - hopRequestedAt > 3_500L) {
-            getLogger().warn("HOP TIMEOUT: still on world {}; retrying", current);
+        if (hopRequestedAt > 0L && now - hopRequestedAt > 3_500L) {
+            getLogger().warn("HOP TIMEOUT: still on world {}; trying another target", current);
+            if (hopTargetWorld > 0) rememberWorld(hopTargetWorld);
             hopTargetWorld = -1;
+            hopArrivedAt = 0L;
             setState(State.HOP_WORLD, "hop timeout");
-            return 180;
+            return 160;
         }
 
-        return 250;
+        return 180;
     }
 
     private int walkDeposit(APIContext ctx) {
