@@ -26,10 +26,10 @@ public class WizardHatBuyer extends LoopScript {
     private static final Tile PORT_SARIM_DEPOSIT = new Tile(3045, 3236, 0);
 
     private static final String BLUE_HAT = "Blue wizard hat";
-    // The black hat is exposed as "Wizard hat" in current OSRS shop data.
-    // "Black wizard hat" is kept as an alias in case the client/API uses that label.
-    private static final String BLACK_HAT = "Wizard hat";
-    private static final String BLACK_HAT_ALIAS = "Black wizard hat";
+    private static final String BLUE_HAT_ALIAS = "Wizard hat";
+    private static final String BLACK_HAT = "Black wizard hat";
+    private static final int BLUE_HAT_ID = 579;
+    private static final int BLACK_HAT_ID = 1017;
 
     // Coins occupy slot 0, leaving 27 inventory slots.
     // We finish each WORLD purchase cycle before checking this threshold, so an odd
@@ -45,10 +45,10 @@ public class WizardHatBuyer extends LoopScript {
     private long lastHopActivityAt = 0L;
     private long scriptStartedAt = 0L;
     private int zeroCoinStableChecks = 0;
-    private int emptyShopSnapshotChecks = 0;
+    private long shopOpenedAt = 0L;
     private static final long COIN_GRACE_MS = 7_000L;
     private static final int ZERO_COIN_CONFIRMATIONS = 8;
-    private static final int EMPTY_SHOP_SNAPSHOT_RETRIES = 10;
+    private static final long SHOP_SETTLE_MS = 800L;
 
     private enum State {
         CHECK,
@@ -70,7 +70,7 @@ public class WizardHatBuyer extends LoopScript {
         scriptStartedAt = System.currentTimeMillis();
         lastHopActivityAt = scriptStartedAt;
         zeroCoinStableChecks = 0;
-        emptyShopSnapshotChecks = 0;
+        shopOpenedAt = 0L;
         return true;
     }
 
@@ -195,13 +195,12 @@ public class WizardHatBuyer extends LoopScript {
 
     private int buyBlue(APIContext ctx) {
         if (!ctx.store().isOpen()) {
-            emptyShopSnapshotChecks = 0;
             setState(State.OPEN_SHOP, "shop closed before blue purchase");
             return 140;
         }
 
-        if (!shopSnapshotReady(ctx)) {
-            return waitForShopSnapshot(ctx, "blue");
+        if (System.currentTimeMillis() - shopOpenedAt < SHOP_SETTLE_MS) {
+            return 180;
         }
 
         if (ctx.inventory().isFull()) {
@@ -210,33 +209,27 @@ public class WizardHatBuyer extends LoopScript {
             return 180;
         }
 
-        int stock = ctx.store().getCount(BLUE_HAT);
-        if (stock > 0) {
-            int before = ctx.inventory().getCount(BLUE_HAT);
-            if (ctx.store().buyOne(BLUE_HAT)) {
-                getLogger().info("BUY: {} | before={} | world={}",
-                        BLUE_HAT, before, ctx.world().getCurrent());
-                // Advance immediately after one purchase. Do not wait for shop stock
-                // metadata to refresh or we can repeatedly buy the same colour.
-                setState(State.BUY_BLACK, "blue purchase requested");
-                return 180;
-            }
-            return 220;
+        List<?> storeItems = ctx.store().getItems();
+        int visibleItems = storeItems == null ? 0 : storeItems.size();
+        int before = ctx.inventory().getCount(BLUE_HAT_ID);
+        if (shouldAttemptPurchase(ctx.store().isOpen(), visibleItems)
+                && (ctx.store().buyOne(BLUE_HAT_ID)
+                || ctx.store().buyOne(BLUE_HAT)
+                || ctx.store().buyOne(BLUE_HAT_ALIAS))) {
+            getLogger().info("BUY: {} | before={} | world={}",
+                    BLUE_HAT, before, ctx.world().getCurrent());
+            setState(State.BUY_BLACK, "blue purchase requested");
+            return 180;
         }
 
-        setState(State.BUY_BLACK, "blue checked for this world");
+        setState(State.BUY_BLACK, "blue direct purchase attempted");
         return 120;
     }
 
     private int buyBlack(APIContext ctx) {
         if (!ctx.store().isOpen()) {
-            emptyShopSnapshotChecks = 0;
             setState(State.OPEN_SHOP, "shop closed before black purchase");
             return 140;
-        }
-
-        if (!shopSnapshotReady(ctx)) {
-            return waitForShopSnapshot(ctx, "black");
         }
 
         if (ctx.inventory().isFull()) {
@@ -245,16 +238,16 @@ public class WizardHatBuyer extends LoopScript {
             return 180;
         }
 
-        String blackName = blackStoreName(ctx);
-        if (blackName != null) {
-            int before = blackHatCount(ctx);
-            if (ctx.store().buyOne(blackName)) {
-                getLogger().info("BUY: {} | before={} | world={}",
-                        blackName, before, ctx.world().getCurrent());
-                setState(State.HOP_WORLD, "black purchase requested; world cycle complete");
-                return 180;
-            }
-            return 220;
+        List<?> storeItems = ctx.store().getItems();
+        int visibleItems = storeItems == null ? 0 : storeItems.size();
+        int before = blackHatCount(ctx);
+        if (shouldAttemptPurchase(ctx.store().isOpen(), visibleItems)
+                && (ctx.store().buyOne(BLACK_HAT_ID)
+                || ctx.store().buyOne(BLACK_HAT))) {
+            getLogger().info("BUY: {} | before={} | world={}",
+                    BLACK_HAT, before, ctx.world().getCurrent());
+            setState(State.HOP_WORLD, "black purchase requested; world cycle complete");
+            return 180;
         }
 
         // Finish the whole world purchase cycle before deciding whether to deposit.
@@ -454,21 +447,15 @@ public class WizardHatBuyer extends LoopScript {
         }
 
         // Deposit ONLY the wizard hats. Coins are deliberately never included.
-        if (ctx.inventory().getCount(BLUE_HAT) > 0) {
-            getLogger().info("DEPOSIT: {} x{}", BLUE_HAT, ctx.inventory().getCount(BLUE_HAT));
-            ctx.bank().depositAll(BLUE_HAT);
+        if (ctx.inventory().getCount(BLUE_HAT_ID) > 0) {
+            getLogger().info("DEPOSIT: {} x{}", BLUE_HAT, ctx.inventory().getCount(BLUE_HAT_ID));
+            ctx.bank().depositAll(BLUE_HAT_ID);
             return 160;
         }
 
-        if (ctx.inventory().getCount(BLACK_HAT) > 0) {
-            getLogger().info("DEPOSIT: {} x{}", BLACK_HAT, ctx.inventory().getCount(BLACK_HAT));
-            ctx.bank().depositAll(BLACK_HAT);
-            return 160;
-        }
-
-        if (ctx.inventory().getCount(BLACK_HAT_ALIAS) > 0) {
-            getLogger().info("DEPOSIT: {} x{}", BLACK_HAT_ALIAS, ctx.inventory().getCount(BLACK_HAT_ALIAS));
-            ctx.bank().depositAll(BLACK_HAT_ALIAS);
+        if (ctx.inventory().getCount(BLACK_HAT_ID) > 0) {
+            getLogger().info("DEPOSIT: {} x{}", BLACK_HAT, ctx.inventory().getCount(BLACK_HAT_ID));
+            ctx.bank().depositAll(BLACK_HAT_ID);
             return 160;
         }
 
@@ -511,47 +498,19 @@ public class WizardHatBuyer extends LoopScript {
                 .orElse(null);
     }
 
-    private String blackStoreName(APIContext ctx) {
-        if (ctx.store().getCount(BLACK_HAT) > 0) return BLACK_HAT;
-        if (ctx.store().getCount(BLACK_HAT_ALIAS) > 0) return BLACK_HAT_ALIAS;
-        return null;
-    }
-
-    private boolean shopSnapshotReady(APIContext ctx) {
-        List<?> items = ctx.store().getItems();
-        int visibleItemCount = items == null ? 0 : items.size();
-        boolean ready = isShopSnapshotReady(visibleItemCount);
-        if (ready) emptyShopSnapshotChecks = 0;
-        return ready;
-    }
-
-    private int waitForShopSnapshot(APIContext ctx, String purchaseStep) {
-        emptyShopSnapshotChecks++;
-        getLogger().debug("SHOP: waiting for item snapshot before {} purchase ({}/{})",
-                purchaseStep, emptyShopSnapshotChecks, EMPTY_SHOP_SNAPSHOT_RETRIES);
-
-        if (emptyShopSnapshotChecks >= EMPTY_SHOP_SNAPSHOT_RETRIES) {
-            getLogger().warn("SHOP: item snapshot stayed empty; reopening Betty's shop instead of hopping");
-            emptyShopSnapshotChecks = 0;
-            ctx.store().close();
-            setState(State.OPEN_SHOP, "shop items failed to load");
-            return 320;
-        }
-
-        return 180;
-    }
-
-    static boolean isShopSnapshotReady(int visibleItemCount) {
-        return visibleItemCount > 0;
+    static boolean shouldAttemptPurchase(boolean storeOpen, int visibleItemCount) {
+        // Some EpicBot NXT builds return an empty store item list even while the
+        // shop is visibly open. Store openness is therefore the reliable gate;
+        // direct buyOne calls determine whether each item is actually stocked.
+        return storeOpen;
     }
 
     private int blackHatCount(APIContext ctx) {
-        return ctx.inventory().getCount(BLACK_HAT)
-                + ctx.inventory().getCount(BLACK_HAT_ALIAS);
+        return ctx.inventory().getCount(BLACK_HAT_ID);
     }
 
     private int hatCount(APIContext ctx) {
-        return ctx.inventory().getCount(BLUE_HAT) + blackHatCount(ctx);
+        return ctx.inventory().getCount(BLUE_HAT_ID) + blackHatCount(ctx);
     }
 
     private void keepCoinsInFirstSlot(APIContext ctx) {
@@ -590,6 +549,7 @@ public class WizardHatBuyer extends LoopScript {
         if (state != next) {
             getLogger().info("STATE {} -> {} | {}", state, next, reason);
             state = next;
+            if (next == State.BUY_BLUE) shopOpenedAt = System.currentTimeMillis();
         }
     }
 
