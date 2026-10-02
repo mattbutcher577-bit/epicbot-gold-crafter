@@ -20,6 +20,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 @ScriptManifest(name = "Wizard Hat Buyer", gameType = GameType.OS)
 public class WizardHatBuyer extends LoopScript {
@@ -631,13 +632,14 @@ public class WizardHatBuyer extends LoopScript {
 
         if (blueCount > 0) {
             blueCountBeforeDeposit = blueCount;
-            if (ctx.bank().depositAll(BLUE_HAT_ID)) {
+            if (requestDepositAll(ctx, BLUE_HAT_ID)) {
                 blueDepositRequestedAt = System.currentTimeMillis();
                 blueDepositPending = true;
                 getLogger().info("DEPOSIT REQUESTED: {} x{}", BLUE_HAT, blueCount);
                 return 180;
             }
             failedDepositRequests++;
+            logWaiting("DEPOSIT: action rejected for Blue wizard hat | count={}", blueCount);
             return 300;
         }
 
@@ -660,13 +662,14 @@ public class WizardHatBuyer extends LoopScript {
 
         if (blackCount > 0) {
             blackCountBeforeDeposit = blackCount;
-            if (ctx.bank().depositAll(BLACK_HAT_ID)) {
+            if (requestDepositAll(ctx, BLACK_HAT_ID)) {
                 blackDepositRequestedAt = System.currentTimeMillis();
                 blackDepositPending = true;
                 getLogger().info("DEPOSIT REQUESTED: {} x{}", BLACK_HAT, blackCount);
                 return 180;
             }
             failedDepositRequests++;
+            logWaiting("DEPOSIT: action rejected for Black wizard hat | count={}", blackCount);
             return 300;
         }
 
@@ -674,6 +677,14 @@ public class WizardHatBuyer extends LoopScript {
         keepCoinsInFirstSlot(ctx);
         setState(State.CHECK, "hats deposited; rechecking inventory");
         return 220;
+    }
+
+    private boolean requestDepositAll(APIContext ctx, int itemId) {
+        // A Port Sarim deposit box exposes Deposit-All on inventory items. The
+        // bank API can report the interface as open while rejecting depositAll.
+        return tryDepositActions(
+                () -> ctx.inventory().interactItem("Deposit-All", itemId),
+                () -> ctx.bank().depositAll(itemId));
     }
 
     private NPC findBetty(APIContext ctx) {
@@ -746,6 +757,10 @@ public class WizardHatBuyer extends LoopScript {
 
     static boolean depositConfirmed(int currentCount) {
         return currentCount == 0;
+    }
+
+    static boolean tryDepositActions(BooleanSupplier inventoryAction, BooleanSupplier bankFallback) {
+        return inventoryAction.getAsBoolean() || bankFallback.getAsBoolean();
     }
 
     static boolean hasTimedOut(long now, long enteredAt, long timeoutMs) {
