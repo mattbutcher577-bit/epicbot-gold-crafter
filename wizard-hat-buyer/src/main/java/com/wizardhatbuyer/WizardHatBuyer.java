@@ -45,8 +45,10 @@ public class WizardHatBuyer extends LoopScript {
     private long lastHopActivityAt = 0L;
     private long scriptStartedAt = 0L;
     private int zeroCoinStableChecks = 0;
+    private int emptyShopSnapshotChecks = 0;
     private static final long COIN_GRACE_MS = 7_000L;
     private static final int ZERO_COIN_CONFIRMATIONS = 8;
+    private static final int EMPTY_SHOP_SNAPSHOT_RETRIES = 10;
 
     private enum State {
         CHECK,
@@ -68,6 +70,7 @@ public class WizardHatBuyer extends LoopScript {
         scriptStartedAt = System.currentTimeMillis();
         lastHopActivityAt = scriptStartedAt;
         zeroCoinStableChecks = 0;
+        emptyShopSnapshotChecks = 0;
         return true;
     }
 
@@ -192,8 +195,13 @@ public class WizardHatBuyer extends LoopScript {
 
     private int buyBlue(APIContext ctx) {
         if (!ctx.store().isOpen()) {
+            emptyShopSnapshotChecks = 0;
             setState(State.OPEN_SHOP, "shop closed before blue purchase");
             return 140;
+        }
+
+        if (!shopSnapshotReady(ctx)) {
+            return waitForShopSnapshot(ctx, "blue");
         }
 
         if (ctx.inventory().isFull()) {
@@ -222,8 +230,13 @@ public class WizardHatBuyer extends LoopScript {
 
     private int buyBlack(APIContext ctx) {
         if (!ctx.store().isOpen()) {
+            emptyShopSnapshotChecks = 0;
             setState(State.OPEN_SHOP, "shop closed before black purchase");
             return 140;
+        }
+
+        if (!shopSnapshotReady(ctx)) {
+            return waitForShopSnapshot(ctx, "black");
         }
 
         if (ctx.inventory().isFull()) {
@@ -502,6 +515,34 @@ public class WizardHatBuyer extends LoopScript {
         if (ctx.store().getCount(BLACK_HAT) > 0) return BLACK_HAT;
         if (ctx.store().getCount(BLACK_HAT_ALIAS) > 0) return BLACK_HAT_ALIAS;
         return null;
+    }
+
+    private boolean shopSnapshotReady(APIContext ctx) {
+        List<?> items = ctx.store().getItems();
+        int visibleItemCount = items == null ? 0 : items.size();
+        boolean ready = isShopSnapshotReady(visibleItemCount);
+        if (ready) emptyShopSnapshotChecks = 0;
+        return ready;
+    }
+
+    private int waitForShopSnapshot(APIContext ctx, String purchaseStep) {
+        emptyShopSnapshotChecks++;
+        getLogger().debug("SHOP: waiting for item snapshot before {} purchase ({}/{})",
+                purchaseStep, emptyShopSnapshotChecks, EMPTY_SHOP_SNAPSHOT_RETRIES);
+
+        if (emptyShopSnapshotChecks >= EMPTY_SHOP_SNAPSHOT_RETRIES) {
+            getLogger().warn("SHOP: item snapshot stayed empty; reopening Betty's shop instead of hopping");
+            emptyShopSnapshotChecks = 0;
+            ctx.store().close();
+            setState(State.OPEN_SHOP, "shop items failed to load");
+            return 320;
+        }
+
+        return 180;
+    }
+
+    static boolean isShopSnapshotReady(int visibleItemCount) {
+        return visibleItemCount > 0;
     }
 
     private int blackHatCount(APIContext ctx) {
