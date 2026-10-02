@@ -52,6 +52,8 @@ public class WizardHatBuyer extends LoopScript {
     private boolean blackPurchasePending = false;
     private int blackCountBeforePurchase = 0;
     private long blackPurchaseRequestedAt = 0L;
+    private boolean forceTradeAfterHop = false;
+    private boolean forcedShopCloseSent = false;
     private static final long COIN_GRACE_MS = 7_000L;
     private static final int ZERO_COIN_CONFIRMATIONS = 8;
     private static final long SHOP_SETTLE_MS = 800L;
@@ -80,6 +82,8 @@ public class WizardHatBuyer extends LoopScript {
         shopOpenedAt = 0L;
         bluePurchasePending = false;
         blackPurchasePending = false;
+        forceTradeAfterHop = false;
+        forcedShopCloseSent = false;
         return true;
     }
 
@@ -151,7 +155,7 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private int walkShop(APIContext ctx) {
-        if (ctx.store().isOpen()) {
+        if (shouldUseOpenShopShortcut(ctx.store().isOpen(), forceTradeAfterHop)) {
             setState(State.BUY_BLUE, "shop already open");
             return 140;
         }
@@ -173,7 +177,31 @@ public class WizardHatBuyer extends LoopScript {
             return 140;
         }
 
-        if (ctx.store().isOpen()) {
+        if (forceTradeAfterHop) {
+            if (!forcedShopCloseSent) {
+                getLogger().info("SHOP: invalidating stale pre-hop shop session");
+                if (ctx.store().isOpen()) ctx.store().close();
+                forcedShopCloseSent = true;
+                return 320;
+            }
+
+            NPC betty = findBetty(ctx);
+            if (betty == null) {
+                getLogger().warn("SHOP: Betty not visible for required post-hop retrade");
+                return 180;
+            }
+
+            getLogger().info("SHOP: forcing fresh trade after hop | distance={}", betty.tileDistanceTo(ctx));
+            if (betty.interact("Trade") || betty.interact("Trade-with")) {
+                forceTradeAfterHop = false;
+                forcedShopCloseSent = false;
+                return 500;
+            }
+
+            return 220;
+        }
+
+        if (shouldUseOpenShopShortcut(ctx.store().isOpen(), false)) {
             setState(State.BUY_BLUE, "shop opened");
             return 140;
         }
@@ -425,7 +453,9 @@ public class WizardHatBuyer extends LoopScript {
                 hopTargetWorld = -1;
                 hopRequestedAt = 0L;
                 hopArrivedAt = 0L;
-                setState(State.WALK_SHOP, "new world stable");
+                forceTradeAfterHop = true;
+                forcedShopCloseSent = false;
+                setState(State.OPEN_SHOP, "new world stable; fresh trade required");
                 return 160;
             }
 
@@ -566,6 +596,10 @@ public class WizardHatBuyer extends LoopScript {
 
     static boolean purchaseConfirmed(int beforeCount, int currentCount) {
         return currentCount > beforeCount;
+    }
+
+    static boolean shouldUseOpenShopShortcut(boolean storeOpen, boolean forceTradeAfterHop) {
+        return storeOpen && !forceTradeAfterHop;
     }
 
     private int blackHatCount(APIContext ctx) {
