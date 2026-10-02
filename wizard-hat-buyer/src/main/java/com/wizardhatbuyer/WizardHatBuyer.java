@@ -41,6 +41,11 @@ public class WizardHatBuyer extends LoopScript {
     private int hopFromWorld = -1;
     private int hopTargetWorld = -1;
     private long hopRequestedAt = 0L;
+    private long lastHopActivityAt = 0L;
+    private long scriptStartedAt = 0L;
+    private int zeroCoinStableChecks = 0;
+    private static final long COIN_GRACE_MS = 7_000L;
+    private static final int ZERO_COIN_CONFIRMATIONS = 8;
 
     private enum State {
         CHECK,
@@ -59,6 +64,9 @@ public class WizardHatBuyer extends LoopScript {
     public boolean onStart(String... args) {
         getLogger().info("Wizard Hat Buyer starting | F2P | Betty -> Port Sarim BOAT-PIER deposit box (not a bank)");
         state = State.CHECK;
+        scriptStartedAt = System.currentTimeMillis();
+        lastHopActivityAt = scriptStartedAt;
+        zeroCoinStableChecks = 0;
         return true;
     }
 
@@ -70,11 +78,34 @@ public class WizardHatBuyer extends LoopScript {
             return 600;
         }
 
-        // User requirement: the ONLY normal stop condition is Coins == 0.
-        if (ctx.inventory().getCount("Coins") <= 0) {
-            getLogger().info("No Coins remain - stopping Wizard Hat Buyer");
-            ctx.script().stop("Out of Coins");
-            return 600;
+        // User requirement: the ONLY normal stop condition is genuinely being out of Coins.
+        // EpicBot can temporarily expose an empty inventory during a world hop/loading transition,
+        // so never trust a single zero-coin read.
+        long now = System.currentTimeMillis();
+        int coins = ctx.inventory().getCount("Coins");
+        boolean hopOrLoadGrace =
+                state == State.HOP_WORLD
+                        || state == State.WAIT_WORLD
+                        || now - lastHopActivityAt < COIN_GRACE_MS
+                        || now - scriptStartedAt < COIN_GRACE_MS;
+
+        if (coins > 0) {
+            zeroCoinStableChecks = 0;
+        } else if (hopOrLoadGrace) {
+            // Ignore transient empty inventory while hopping/loading.
+            zeroCoinStableChecks = 0;
+            getLogger().debug("COINS: zero ignored during hop/loading grace | state={}", state);
+        } else {
+            zeroCoinStableChecks++;
+            getLogger().warn("COINS: zero check {}/{} - confirming before stop",
+                    zeroCoinStableChecks, ZERO_COIN_CONFIRMATIONS);
+
+            if (zeroCoinStableChecks >= ZERO_COIN_CONFIRMATIONS) {
+                getLogger().info("No Coins remain after {} stable checks - stopping Wizard Hat Buyer",
+                        ZERO_COIN_CONFIRMATIONS);
+                ctx.script().stop("Out of Coins");
+                return 600;
+            }
         }
 
         keepCoinsInFirstSlot(ctx);
@@ -279,11 +310,13 @@ public class WizardHatBuyer extends LoopScript {
 
         hopFromWorld = current;
         hopRequestedAt = System.currentTimeMillis();
+        lastHopActivityAt = hopRequestedAt;
 
         if (target != null) {
             hopTargetWorld = target.getId();
             getLogger().info("HOP: clicking world {} -> {}", current, hopTargetWorld);
             if (ctx.world().hop(hopTargetWorld)) {
+                lastHopActivityAt = System.currentTimeMillis();
                 setState(State.WAIT_WORLD, "explicit world hop clicked");
                 return 220;
             }
@@ -295,6 +328,7 @@ public class WizardHatBuyer extends LoopScript {
         // Fallback to EpicBot's built-in F2P selection while the world menu is already open.
         hopTargetWorld = -1;
         if (ctx.world().hopToF2P()) {
+            lastHopActivityAt = System.currentTimeMillis();
             setState(State.WAIT_WORLD, "built-in F2P hop clicked");
             return 350;
         }
@@ -308,6 +342,7 @@ public class WizardHatBuyer extends LoopScript {
 
         if (current > 0 && current != hopFromWorld) {
             getLogger().info("HOP SUCCESS: {} -> {}", hopFromWorld, current);
+            lastHopActivityAt = System.currentTimeMillis();
             hopTargetWorld = -1;
             hopRequestedAt = 0L;
             setState(State.WALK_SHOP, "new world loaded");
