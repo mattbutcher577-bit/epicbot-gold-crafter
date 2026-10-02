@@ -493,7 +493,7 @@ public class WizardHatBuyer extends LoopScript {
             return 140;
         }
 
-        if (ctx.bank().isOpen()) {
+        if (depositInterfaceReady(ctx)) {
             setState(State.DEPOSIT_HATS, "deposit interface already open");
             return 140;
         }
@@ -510,7 +510,7 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private int openDeposit(APIContext ctx) {
-        if (ctx.bank().isOpen()) {
+        if (depositInterfaceReady(ctx)) {
             setState(State.DEPOSIT_HATS, "deposit box opened");
             return 140;
         }
@@ -530,7 +530,7 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private int depositHats(APIContext ctx) {
-        if (!ctx.bank().isOpen()) {
+        if (!depositInterfaceReady(ctx)) {
             setState(State.OPEN_DEPOSIT, "deposit interface closed");
             return 140;
         }
@@ -600,6 +600,14 @@ public class WizardHatBuyer extends LoopScript {
 
     static boolean shouldUseOpenShopShortcut(boolean storeOpen, boolean forceTradeAfterHop) {
         return storeOpen && !forceTradeAfterHop;
+    }
+
+    private boolean depositInterfaceReady(APIContext ctx) {
+        return isDepositInterfaceReady(ctx.bank().isOpen(), ctx.bank().isVisible());
+    }
+
+    static boolean isDepositInterfaceReady(boolean bankOpen, boolean bankVisible) {
+        return bankOpen || bankVisible;
     }
 
     private int blackHatCount(APIContext ctx) {
