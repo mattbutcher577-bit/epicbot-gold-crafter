@@ -102,6 +102,14 @@ public class WizardHatBuyer extends LoopScript {
         DEPOSIT_HATS
     }
 
+    enum DepositStep {
+        CONFIRMED,
+        WAIT,
+        RETRY,
+        OPEN_INTERFACE,
+        REQUEST
+    }
+
     @Override
     public boolean onStart(String... args) {
         getLogger().info("Wizard Hat Buyer starting | F2P | Betty -> Port Sarim BOAT-PIER deposit box (not a bank)");
@@ -608,18 +616,21 @@ public class WizardHatBuyer extends LoopScript {
     }
 
     private int depositHats(APIContext ctx) {
-        if (!depositInterfaceReady(ctx)) {
-            setState(State.OPEN_DEPOSIT, "deposit interface closed");
-            return 140;
-        }
-
+        long now = System.currentTimeMillis();
+        boolean interfaceReady = depositInterfaceReady(ctx);
         int blueCount = ctx.inventory().getCount(BLUE_HAT_ID);
         if (blueDepositPending) {
-            if (depositConfirmed(blueCount)) {
+            DepositStep blueStep = nextDepositStep(
+                    true,
+                    blueCount,
+                    now - blueDepositRequestedAt,
+                    DEPOSIT_CONFIRM_TIMEOUT_MS,
+                    interfaceReady);
+            if (blueStep == DepositStep.CONFIRMED) {
                 getLogger().info("DEPOSIT CONFIRMED: {} x{}", BLUE_HAT, blueCountBeforeDeposit);
                 hatsDeposited += blueCountBeforeDeposit;
                 blueDepositPending = false;
-            } else if (System.currentTimeMillis() - blueDepositRequestedAt < DEPOSIT_CONFIRM_TIMEOUT_MS) {
+            } else if (blueStep == DepositStep.WAIT) {
                 logWaiting("DEPOSIT: waiting for Blue wizard hat confirmation | count={}", blueCount);
                 return 180;
             } else {
@@ -630,26 +641,37 @@ public class WizardHatBuyer extends LoopScript {
             }
         }
 
+        if (!interfaceReady) {
+            setState(State.OPEN_DEPOSIT, "deposit interface closed after confirmation check");
+            return 140;
+        }
+
         if (blueCount > 0) {
             blueCountBeforeDeposit = blueCount;
-            if (requestDepositAll(ctx, BLUE_HAT_ID)) {
-                blueDepositRequestedAt = System.currentTimeMillis();
-                blueDepositPending = true;
+            boolean accepted = requestDepositAll(ctx, BLUE_HAT_ID);
+            blueDepositRequestedAt = now;
+            blueDepositPending = true;
+            if (accepted) {
                 getLogger().info("DEPOSIT REQUESTED: {} x{}", BLUE_HAT, blueCount);
-                return 180;
+            } else {
+                getLogger().warn("DEPOSIT SENT: EpicBot returned false for {}; verifying inventory before retry", BLUE_HAT);
             }
-            failedDepositRequests++;
-            logWaiting("DEPOSIT: action rejected for Blue wizard hat | count={}", blueCount);
-            return 300;
+            return 180;
         }
 
         int blackCount = ctx.inventory().getCount(BLACK_HAT_ID);
         if (blackDepositPending) {
-            if (depositConfirmed(blackCount)) {
+            DepositStep blackStep = nextDepositStep(
+                    true,
+                    blackCount,
+                    now - blackDepositRequestedAt,
+                    DEPOSIT_CONFIRM_TIMEOUT_MS,
+                    interfaceReady);
+            if (blackStep == DepositStep.CONFIRMED) {
                 getLogger().info("DEPOSIT CONFIRMED: {} x{}", BLACK_HAT, blackCountBeforeDeposit);
                 hatsDeposited += blackCountBeforeDeposit;
                 blackDepositPending = false;
-            } else if (System.currentTimeMillis() - blackDepositRequestedAt < DEPOSIT_CONFIRM_TIMEOUT_MS) {
+            } else if (blackStep == DepositStep.WAIT) {
                 logWaiting("DEPOSIT: waiting for Black wizard hat confirmation | count={}", blackCount);
                 return 180;
             } else {
@@ -660,17 +682,23 @@ public class WizardHatBuyer extends LoopScript {
             }
         }
 
+
+        if (!interfaceReady) {
+            setState(State.OPEN_DEPOSIT, "deposit interface closed after confirmation check");
+            return 140;
+        }
+
         if (blackCount > 0) {
             blackCountBeforeDeposit = blackCount;
-            if (requestDepositAll(ctx, BLACK_HAT_ID)) {
-                blackDepositRequestedAt = System.currentTimeMillis();
-                blackDepositPending = true;
+            boolean accepted = requestDepositAll(ctx, BLACK_HAT_ID);
+            blackDepositRequestedAt = now;
+            blackDepositPending = true;
+            if (accepted) {
                 getLogger().info("DEPOSIT REQUESTED: {} x{}", BLACK_HAT, blackCount);
-                return 180;
+            } else {
+                getLogger().warn("DEPOSIT SENT: EpicBot returned false for {}; verifying inventory before retry", BLACK_HAT);
             }
-            failedDepositRequests++;
-            logWaiting("DEPOSIT: action rejected for Black wizard hat | count={}", blackCount);
-            return 300;
+            return 180;
         }
 
         ctx.bank().close();
@@ -757,6 +785,18 @@ public class WizardHatBuyer extends LoopScript {
 
     static boolean depositConfirmed(int currentCount) {
         return currentCount == 0;
+    }
+
+    static DepositStep nextDepositStep(
+            boolean pending,
+            int currentCount,
+            long elapsedMs,
+            long timeoutMs,
+            boolean interfaceReady) {
+        if (pending && depositConfirmed(currentCount)) return DepositStep.CONFIRMED;
+        if (pending && elapsedMs < timeoutMs) return DepositStep.WAIT;
+        if (pending) return DepositStep.RETRY;
+        return interfaceReady ? DepositStep.REQUEST : DepositStep.OPEN_INTERFACE;
     }
 
     static boolean tryDepositActions(BooleanSupplier inventoryAction, BooleanSupplier bankFallback) {
