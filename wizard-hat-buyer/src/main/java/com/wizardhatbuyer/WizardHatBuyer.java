@@ -46,9 +46,16 @@ public class WizardHatBuyer extends LoopScript {
     private long scriptStartedAt = 0L;
     private int zeroCoinStableChecks = 0;
     private long shopOpenedAt = 0L;
+    private boolean bluePurchasePending = false;
+    private int blueCountBeforePurchase = 0;
+    private long bluePurchaseRequestedAt = 0L;
+    private boolean blackPurchasePending = false;
+    private int blackCountBeforePurchase = 0;
+    private long blackPurchaseRequestedAt = 0L;
     private static final long COIN_GRACE_MS = 7_000L;
     private static final int ZERO_COIN_CONFIRMATIONS = 8;
     private static final long SHOP_SETTLE_MS = 800L;
+    private static final long PURCHASE_CONFIRM_TIMEOUT_MS = 2_500L;
 
     private enum State {
         CHECK,
@@ -71,6 +78,8 @@ public class WizardHatBuyer extends LoopScript {
         lastHopActivityAt = scriptStartedAt;
         zeroCoinStableChecks = 0;
         shopOpenedAt = 0L;
+        bluePurchasePending = false;
+        blackPurchasePending = false;
         return true;
     }
 
@@ -195,6 +204,7 @@ public class WizardHatBuyer extends LoopScript {
 
     private int buyBlue(APIContext ctx) {
         if (!ctx.store().isOpen()) {
+            bluePurchasePending = false;
             setState(State.OPEN_SHOP, "shop closed before blue purchase");
             return 140;
         }
@@ -204,8 +214,30 @@ public class WizardHatBuyer extends LoopScript {
         }
 
         if (ctx.inventory().isFull()) {
+            bluePurchasePending = false;
             ctx.store().close();
             setState(State.WALK_DEPOSIT, "inventory full");
+            return 180;
+        }
+
+        if (bluePurchasePending) {
+            int current = ctx.inventory().getCount(BLUE_HAT_ID);
+            if (purchaseConfirmed(blueCountBeforePurchase, current)) {
+                getLogger().info("BUY CONFIRMED: {} | {} -> {} | world={}",
+                        BLUE_HAT, blueCountBeforePurchase, current, ctx.world().getCurrent());
+                bluePurchasePending = false;
+                setState(State.BUY_BLACK, "blue purchase confirmed");
+                return 180;
+            }
+
+            if (System.currentTimeMillis() - bluePurchaseRequestedAt < PURCHASE_CONFIRM_TIMEOUT_MS) {
+                getLogger().debug("BUY: waiting for {} inventory confirmation | count={}", BLUE_HAT, current);
+                return 180;
+            }
+
+            getLogger().warn("BUY: {} request was not confirmed; continuing to black hat", BLUE_HAT);
+            bluePurchasePending = false;
+            setState(State.BUY_BLACK, "blue purchase not confirmed");
             return 180;
         }
 
@@ -216,9 +248,11 @@ public class WizardHatBuyer extends LoopScript {
                 && (ctx.store().buyOne(BLUE_HAT_ID)
                 || ctx.store().buyOne(BLUE_HAT)
                 || ctx.store().buyOne(BLUE_HAT_ALIAS))) {
-            getLogger().info("BUY: {} | before={} | world={}",
+            blueCountBeforePurchase = before;
+            bluePurchaseRequestedAt = System.currentTimeMillis();
+            bluePurchasePending = true;
+            getLogger().info("BUY REQUESTED: {} | before={} | world={}",
                     BLUE_HAT, before, ctx.world().getCurrent());
-            setState(State.BUY_BLACK, "blue purchase requested");
             return 180;
         }
 
@@ -228,13 +262,36 @@ public class WizardHatBuyer extends LoopScript {
 
     private int buyBlack(APIContext ctx) {
         if (!ctx.store().isOpen()) {
+            blackPurchasePending = false;
             setState(State.OPEN_SHOP, "shop closed before black purchase");
             return 140;
         }
 
         if (ctx.inventory().isFull()) {
+            blackPurchasePending = false;
             ctx.store().close();
             setState(State.WALK_DEPOSIT, "inventory full");
+            return 180;
+        }
+
+        if (blackPurchasePending) {
+            int current = blackHatCount(ctx);
+            if (purchaseConfirmed(blackCountBeforePurchase, current)) {
+                getLogger().info("BUY CONFIRMED: {} | {} -> {} | world={}",
+                        BLACK_HAT, blackCountBeforePurchase, current, ctx.world().getCurrent());
+                blackPurchasePending = false;
+                setState(State.HOP_WORLD, "black purchase confirmed; world cycle complete");
+                return 180;
+            }
+
+            if (System.currentTimeMillis() - blackPurchaseRequestedAt < PURCHASE_CONFIRM_TIMEOUT_MS) {
+                getLogger().debug("BUY: waiting for {} inventory confirmation | count={}", BLACK_HAT, current);
+                return 180;
+            }
+
+            getLogger().warn("BUY: {} request was not confirmed; world cycle complete", BLACK_HAT);
+            blackPurchasePending = false;
+            setState(State.HOP_WORLD, "black purchase not confirmed; world cycle complete");
             return 180;
         }
 
@@ -244,9 +301,11 @@ public class WizardHatBuyer extends LoopScript {
         if (shouldAttemptPurchase(ctx.store().isOpen(), visibleItems)
                 && (ctx.store().buyOne(BLACK_HAT_ID)
                 || ctx.store().buyOne(BLACK_HAT))) {
-            getLogger().info("BUY: {} | before={} | world={}",
+            blackCountBeforePurchase = before;
+            blackPurchaseRequestedAt = System.currentTimeMillis();
+            blackPurchasePending = true;
+            getLogger().info("BUY REQUESTED: {} | before={} | world={}",
                     BLACK_HAT, before, ctx.world().getCurrent());
-            setState(State.HOP_WORLD, "black purchase requested; world cycle complete");
             return 180;
         }
 
@@ -503,6 +562,10 @@ public class WizardHatBuyer extends LoopScript {
         // shop is visibly open. Store openness is therefore the reliable gate;
         // direct buyOne calls determine whether each item is actually stocked.
         return storeOpen;
+    }
+
+    static boolean purchaseConfirmed(int beforeCount, int currentCount) {
+        return currentCount > beforeCount;
     }
 
     private int blackHatCount(APIContext ctx) {
