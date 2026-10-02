@@ -17,7 +17,9 @@ import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @ScriptManifest(name = "Wizard Hat Buyer", gameType = GameType.OS)
 public class WizardHatBuyer extends LoopScript {
@@ -39,7 +41,9 @@ public class WizardHatBuyer extends LoopScript {
     private static final int DEPOSIT_THRESHOLD = 26;
 
     private final Deque<Integer> recentWorlds = new ArrayDeque<>();
+    private final Map<Integer, Long> failedWorldUntil = new HashMap<>();
     private State state = State.CHECK;
+    private long stateEnteredAt = 0L;
     private int hopFromWorld = -1;
     private int hopTargetWorld = -1;
     private long hopRequestedAt = 0L;
@@ -56,10 +60,33 @@ public class WizardHatBuyer extends LoopScript {
     private long blackPurchaseRequestedAt = 0L;
     private boolean forceTradeAfterHop = false;
     private boolean forcedShopCloseSent = false;
+    private boolean blueDepositPending = false;
+    private int blueCountBeforeDeposit = 0;
+    private long blueDepositRequestedAt = 0L;
+    private boolean blackDepositPending = false;
+    private int blackCountBeforeDeposit = 0;
+    private long blackDepositRequestedAt = 0L;
+    private int consecutiveHopFailures = 0;
+    private long lastWaitingLogAt = 0L;
+    private long lastStatsLogAt = 0L;
+    private int hatsBought = 0;
+    private int hatsDeposited = 0;
+    private int successfulHops = 0;
+    private int failedPurchaseRequests = 0;
+    private int failedDepositRequests = 0;
+    private int failedHopRequests = 0;
+    private int watchdogRecoveries = 0;
+    private long gpSpent = 0L;
+    private int blueCoinsBeforePurchase = -1;
+    private int blackCoinsBeforePurchase = -1;
     private static final long COIN_GRACE_MS = 7_000L;
     private static final int ZERO_COIN_CONFIRMATIONS = 8;
     private static final long SHOP_SETTLE_MS = 800L;
     private static final long PURCHASE_CONFIRM_TIMEOUT_MS = 2_500L;
+    private static final long DEPOSIT_CONFIRM_TIMEOUT_MS = 3_000L;
+    private static final long FAILED_WORLD_COOLDOWN_MS = 15_000L;
+    private static final long WAIT_LOG_INTERVAL_MS = 1_000L;
+    private static final long STATS_LOG_INTERVAL_MS = 60_000L;
 
     private enum State {
         CHECK,
@@ -79,6 +106,7 @@ public class WizardHatBuyer extends LoopScript {
         getLogger().info("Wizard Hat Buyer starting | F2P | Betty -> Port Sarim BOAT-PIER deposit box (not a bank)");
         state = State.CHECK;
         scriptStartedAt = System.currentTimeMillis();
+        stateEnteredAt = scriptStartedAt;
         lastHopActivityAt = scriptStartedAt;
         zeroCoinStableChecks = 0;
         shopOpenedAt = 0L;
@@ -86,6 +114,21 @@ public class WizardHatBuyer extends LoopScript {
         blackPurchasePending = false;
         forceTradeAfterHop = false;
         forcedShopCloseSent = false;
+        blueDepositPending = false;
+        blackDepositPending = false;
+        consecutiveHopFailures = 0;
+        lastWaitingLogAt = 0L;
+        lastStatsLogAt = scriptStartedAt;
+        hatsBought = 0;
+        hatsDeposited = 0;
+        successfulHops = 0;
+        failedPurchaseRequests = 0;
+        failedDepositRequests = 0;
+        failedHopRequests = 0;
+        watchdogRecoveries = 0;
+        gpSpent = 0L;
+        failedWorldUntil.clear();
+        recentWorlds.clear();
         return true;
     }
 
@@ -107,13 +150,19 @@ public class WizardHatBuyer extends LoopScript {
                         || state == State.WAIT_WORLD
                         || now - lastHopActivityAt < COIN_GRACE_MS
                         || now - scriptStartedAt < COIN_GRACE_MS;
+        boolean inventoryMayBeHidden =
+                state == State.HOP_WORLD
+                        || state == State.WAIT_WORLD
+                        || state == State.OPEN_DEPOSIT
+                        || state == State.DEPOSIT_HATS
+                        || depositInterfaceReady(ctx);
 
         if (coins > 0) {
             zeroCoinStableChecks = 0;
-        } else if (hopOrLoadGrace) {
+        } else if (shouldIgnoreZeroCoins(hopOrLoadGrace, inventoryMayBeHidden)) {
             // Ignore transient empty inventory while hopping/loading.
             zeroCoinStableChecks = 0;
-            getLogger().debug("COINS: zero ignored during hop/loading grace | state={}", state);
+            logWaiting("COINS: zero ignored while inventory may be hidden | state={}", state);
         } else {
             zeroCoinStableChecks++;
             getLogger().warn("COINS: zero check {}/{} - confirming before stop",
@@ -133,6 +182,11 @@ public class WizardHatBuyer extends LoopScript {
             ctx.walking().setRun(true);
         }
 
+        logStatsIfDue(now);
+
+        int watchdogDelay = recoverTimedOutState(ctx, now);
+        if (watchdogDelay >= 0) return watchdogDelay;
+
         return switch (state) {
             case CHECK -> check(ctx);
             case WALK_SHOP -> walkShop(ctx);
@@ -151,7 +205,7 @@ public class WizardHatBuyer extends LoopScript {
         int hats = hatCount(ctx);
         int coins = ctx.inventory().getCount("Coins");
         if (!inventorySnapshotReady(coins, hats)) {
-            getLogger().debug("CHECK: waiting for inventory snapshot before routing");
+            logWaiting("CHECK: waiting for inventory snapshot before routing | state={}", state);
             return 250;
         }
 
@@ -175,7 +229,7 @@ public class WizardHatBuyer extends LoopScript {
             return 140;
         }
 
-        getLogger().info("Walking to Betty's Magic Emporium");
+        logWaiting("Walking to Betty's Magic Emporium | state={}", state);
         ctx.webWalking().walkTo(BETTY_SHOP);
         return 180;
     }
@@ -196,11 +250,11 @@ public class WizardHatBuyer extends LoopScript {
 
             NPC betty = findBetty(ctx);
             if (betty == null) {
-                getLogger().warn("SHOP: Betty not visible for required post-hop retrade");
+                logWaiting("SHOP: waiting for Betty for required post-hop retrade | state={}", state);
                 return 180;
             }
 
-            getLogger().info("SHOP: forcing fresh trade after hop | distance={}", betty.tileDistanceTo(ctx));
+            logWaiting("SHOP: forcing fresh trade after hop | distance={}", betty.tileDistanceTo(ctx));
             if (betty.interact("Trade") || betty.interact("Trade-with")) {
                 forceTradeAfterHop = false;
                 forcedShopCloseSent = false;
@@ -222,7 +276,7 @@ public class WizardHatBuyer extends LoopScript {
             return 160;
         }
 
-        getLogger().info("SHOP: Betty found at distance {} - opening trade", betty.tileDistanceTo(ctx));
+        logWaiting("SHOP: Betty found; opening trade | distance={}", betty.tileDistanceTo(ctx));
 
         // Different client builds can expose the trade action slightly differently.
         if (betty.interact("Trade") || betty.interact("Trade-with")) {
@@ -263,16 +317,19 @@ public class WizardHatBuyer extends LoopScript {
                 getLogger().info("BUY CONFIRMED: {} | {} -> {} | world={}",
                         BLUE_HAT, blueCountBeforePurchase, current, ctx.world().getCurrent());
                 bluePurchasePending = false;
+                hatsBought += current - blueCountBeforePurchase;
+                gpSpent += observedCoinSpend(ctx, blueCoinsBeforePurchase);
                 setState(State.BUY_BLACK, "blue purchase confirmed");
                 return 180;
             }
 
             if (System.currentTimeMillis() - bluePurchaseRequestedAt < PURCHASE_CONFIRM_TIMEOUT_MS) {
-                getLogger().debug("BUY: waiting for {} inventory confirmation | count={}", BLUE_HAT, current);
+                logWaiting("BUY: waiting for Blue wizard hat inventory confirmation | count={}", current);
                 return 180;
             }
 
             getLogger().warn("BUY: {} request was not confirmed; continuing to black hat", BLUE_HAT);
+            failedPurchaseRequests++;
             bluePurchasePending = false;
             setState(State.BUY_BLACK, "blue purchase not confirmed");
             return 180;
@@ -288,6 +345,7 @@ public class WizardHatBuyer extends LoopScript {
             blueCountBeforePurchase = before;
             bluePurchaseRequestedAt = System.currentTimeMillis();
             bluePurchasePending = true;
+            blueCoinsBeforePurchase = coinStackSize(ctx);
             getLogger().info("BUY REQUESTED: {} | before={} | world={}",
                     BLUE_HAT, before, ctx.world().getCurrent());
             return 180;
@@ -317,16 +375,19 @@ public class WizardHatBuyer extends LoopScript {
                 getLogger().info("BUY CONFIRMED: {} | {} -> {} | world={}",
                         BLACK_HAT, blackCountBeforePurchase, current, ctx.world().getCurrent());
                 blackPurchasePending = false;
+                hatsBought += current - blackCountBeforePurchase;
+                gpSpent += observedCoinSpend(ctx, blackCoinsBeforePurchase);
                 setState(State.HOP_WORLD, "black purchase confirmed; world cycle complete");
                 return 180;
             }
 
             if (System.currentTimeMillis() - blackPurchaseRequestedAt < PURCHASE_CONFIRM_TIMEOUT_MS) {
-                getLogger().debug("BUY: waiting for {} inventory confirmation | count={}", BLACK_HAT, current);
+                logWaiting("BUY: waiting for Black wizard hat inventory confirmation | count={}", current);
                 return 180;
             }
 
             getLogger().warn("BUY: {} request was not confirmed; world cycle complete", BLACK_HAT);
+            failedPurchaseRequests++;
             blackPurchasePending = false;
             setState(State.HOP_WORLD, "black purchase not confirmed; world cycle complete");
             return 180;
@@ -341,6 +402,7 @@ public class WizardHatBuyer extends LoopScript {
             blackCountBeforePurchase = before;
             blackPurchaseRequestedAt = System.currentTimeMillis();
             blackPurchasePending = true;
+            blackCoinsBeforePurchase = coinStackSize(ctx);
             getLogger().info("BUY REQUESTED: {} | before={} | world={}",
                     BLACK_HAT, before, ctx.world().getCurrent());
             return 180;
@@ -429,14 +491,18 @@ public class WizardHatBuyer extends LoopScript {
             // EpicBot NXT's built-in F2P hopper can close/replace the current script instance.
             // Mark this target as temporarily skipped and try another explicit F2P world next loop.
             getLogger().warn("HOP: explicit hop to {} returned false; trying a different F2P world", hopTargetWorld);
+            failedWorldUntil.put(hopTargetWorld, System.currentTimeMillis() + FAILED_WORLD_COOLDOWN_MS);
+            consecutiveHopFailures++;
+            failedHopRequests++;
             rememberWorld(hopTargetWorld);
             hopTargetWorld = -1;
-            return 180;
+            return hopRetryDelay(consecutiveHopFailures);
         }
 
         getLogger().warn("HOP: no explicit safe F2P target available; clearing recent list and retrying");
         recentWorlds.clear();
-        return 220;
+        consecutiveHopFailures++;
+        return hopRetryDelay(consecutiveHopFailures);
     }
 
     private int waitWorld(APIContext ctx) {
@@ -448,6 +514,8 @@ public class WizardHatBuyer extends LoopScript {
                 hopArrivedAt = now;
                 lastHopActivityAt = now;
                 getLogger().info("HOP SUCCESS: {} -> {} | waiting for inventory to settle", hopFromWorld, current);
+                successfulHops++;
+                consecutiveHopFailures = 0;
                 return 180;
             }
 
@@ -468,7 +536,7 @@ public class WizardHatBuyer extends LoopScript {
                 return 160;
             }
 
-            getLogger().debug("HOP: waiting for inventory on world {}", current);
+            logWaiting("HOP: waiting for inventory on world {}", current);
             return 160;
         }
 
@@ -513,7 +581,7 @@ public class WizardHatBuyer extends LoopScript {
             return 140;
         }
 
-        getLogger().info("Walking to Port Sarim boat-pier deposit box by Entrana ferry | hats={}", hatCount(ctx));
+        logWaiting("Walking to Port Sarim boat-pier deposit box | hats={}", hatCount(ctx));
         ctx.webWalking().walkTo(PORT_SARIM_DEPOSIT);
         return 180;
     }
@@ -544,22 +612,67 @@ public class WizardHatBuyer extends LoopScript {
             return 140;
         }
 
-        // Deposit ONLY the wizard hats. Coins are deliberately never included.
-        if (ctx.inventory().getCount(BLUE_HAT_ID) > 0) {
-            getLogger().info("DEPOSIT: {} x{}", BLUE_HAT, ctx.inventory().getCount(BLUE_HAT_ID));
-            ctx.bank().depositAll(BLUE_HAT_ID);
-            return 160;
+        int blueCount = ctx.inventory().getCount(BLUE_HAT_ID);
+        if (blueDepositPending) {
+            if (depositConfirmed(blueCount)) {
+                getLogger().info("DEPOSIT CONFIRMED: {} x{}", BLUE_HAT, blueCountBeforeDeposit);
+                hatsDeposited += blueCountBeforeDeposit;
+                blueDepositPending = false;
+            } else if (System.currentTimeMillis() - blueDepositRequestedAt < DEPOSIT_CONFIRM_TIMEOUT_MS) {
+                logWaiting("DEPOSIT: waiting for Blue wizard hat confirmation | count={}", blueCount);
+                return 180;
+            } else {
+                getLogger().warn("DEPOSIT: {} request was not confirmed; retrying", BLUE_HAT);
+                failedDepositRequests++;
+                blueDepositPending = false;
+                return 300;
+            }
         }
 
-        if (ctx.inventory().getCount(BLACK_HAT_ID) > 0) {
-            getLogger().info("DEPOSIT: {} x{}", BLACK_HAT, ctx.inventory().getCount(BLACK_HAT_ID));
-            ctx.bank().depositAll(BLACK_HAT_ID);
-            return 160;
+        if (blueCount > 0) {
+            blueCountBeforeDeposit = blueCount;
+            if (ctx.bank().depositAll(BLUE_HAT_ID)) {
+                blueDepositRequestedAt = System.currentTimeMillis();
+                blueDepositPending = true;
+                getLogger().info("DEPOSIT REQUESTED: {} x{}", BLUE_HAT, blueCount);
+                return 180;
+            }
+            failedDepositRequests++;
+            return 300;
+        }
+
+        int blackCount = ctx.inventory().getCount(BLACK_HAT_ID);
+        if (blackDepositPending) {
+            if (depositConfirmed(blackCount)) {
+                getLogger().info("DEPOSIT CONFIRMED: {} x{}", BLACK_HAT, blackCountBeforeDeposit);
+                hatsDeposited += blackCountBeforeDeposit;
+                blackDepositPending = false;
+            } else if (System.currentTimeMillis() - blackDepositRequestedAt < DEPOSIT_CONFIRM_TIMEOUT_MS) {
+                logWaiting("DEPOSIT: waiting for Black wizard hat confirmation | count={}", blackCount);
+                return 180;
+            } else {
+                getLogger().warn("DEPOSIT: {} request was not confirmed; retrying", BLACK_HAT);
+                failedDepositRequests++;
+                blackDepositPending = false;
+                return 300;
+            }
+        }
+
+        if (blackCount > 0) {
+            blackCountBeforeDeposit = blackCount;
+            if (ctx.bank().depositAll(BLACK_HAT_ID)) {
+                blackDepositRequestedAt = System.currentTimeMillis();
+                blackDepositPending = true;
+                getLogger().info("DEPOSIT REQUESTED: {} x{}", BLACK_HAT, blackCount);
+                return 180;
+            }
+            failedDepositRequests++;
+            return 300;
         }
 
         ctx.bank().close();
         keepCoinsInFirstSlot(ctx);
-        setState(State.WALK_SHOP, "hats deposited; coins retained");
+        setState(State.CHECK, "hats deposited; rechecking inventory");
         return 220;
     }
 
@@ -631,6 +744,119 @@ public class WizardHatBuyer extends LoopScript {
         return coins > 0 || hats > 0;
     }
 
+    static boolean depositConfirmed(int currentCount) {
+        return currentCount == 0;
+    }
+
+    static boolean hasTimedOut(long now, long enteredAt, long timeoutMs) {
+        return now - enteredAt >= timeoutMs;
+    }
+
+    static boolean worldOnCooldown(long now, long cooldownUntil) {
+        return now < cooldownUntil;
+    }
+
+    static int hopRetryDelay(int consecutiveFailures) {
+        return Math.min(1_500, 250 + Math.max(0, consecutiveFailures) * 250);
+    }
+
+    static boolean shouldIgnoreZeroCoins(boolean hopOrLoadGrace, boolean inventoryMayBeHidden) {
+        return hopOrLoadGrace || inventoryMayBeHidden;
+    }
+
+    static boolean shouldLogAgain(long now, long lastLogAt, long intervalMs) {
+        return now - lastLogAt >= intervalMs;
+    }
+
+    private void logWaiting(String message, Object value) {
+        long now = System.currentTimeMillis();
+        if (shouldLogAgain(now, lastWaitingLogAt, WAIT_LOG_INTERVAL_MS)) {
+            getLogger().debug(message, value);
+            lastWaitingLogAt = now;
+        }
+    }
+
+    private int recoverTimedOutState(APIContext ctx, long now) {
+        long timeout = stateTimeoutMs(state);
+        if (!hasTimedOut(now, stateEnteredAt, timeout)) return -1;
+
+        watchdogRecoveries++;
+        getLogger().warn("WATCHDOG: {} exceeded {}ms; recovering", state, timeout);
+        bluePurchasePending = false;
+        blackPurchasePending = false;
+        blueDepositPending = false;
+        blackDepositPending = false;
+
+        switch (state) {
+            case CHECK -> stateEnteredAt = now;
+            case WALK_SHOP -> setState(State.CHECK, "watchdog reset shop route");
+            case OPEN_SHOP, BUY_BLUE, BUY_BLACK -> {
+                if (ctx.store().isOpen()) ctx.store().close();
+                forceTradeAfterHop = false;
+                forcedShopCloseSent = false;
+                setState(State.WALK_SHOP, "watchdog reset shop interaction");
+            }
+            case HOP_WORLD -> {
+                ctx.widgets().closeInterface();
+                stateEnteredAt = now;
+                consecutiveHopFailures++;
+            }
+            case WAIT_WORLD -> setState(State.HOP_WORLD, "watchdog reset world hop");
+            case WALK_DEPOSIT -> setState(State.CHECK, "watchdog reset deposit route");
+            case OPEN_DEPOSIT, DEPOSIT_HATS -> {
+                ctx.widgets().closeInterface();
+                setState(State.WALK_DEPOSIT, "watchdog reset deposit interaction");
+            }
+        }
+        return 300;
+    }
+
+    private long stateTimeoutMs(State currentState) {
+        return switch (currentState) {
+            case CHECK -> 30_000L;
+            case WALK_SHOP, WALK_DEPOSIT -> 120_000L;
+            case OPEN_SHOP, OPEN_DEPOSIT -> 20_000L;
+            case BUY_BLUE, BUY_BLACK -> 12_000L;
+            case HOP_WORLD -> 25_000L;
+            case WAIT_WORLD -> 20_000L;
+            case DEPOSIT_HATS -> 25_000L;
+        };
+    }
+
+    private int coinStackSize(APIContext ctx) {
+        ItemWidget coins = ctx.inventory().getItem("Coins");
+        return coins != null && coins.isValid() ? coins.getStackSize() : -1;
+    }
+
+    private long observedCoinSpend(APIContext ctx, int beforeCoins) {
+        int currentCoins = coinStackSize(ctx);
+        if (beforeCoins < 0 || currentCoins < 0) return 0L;
+        return Math.max(0, beforeCoins - currentCoins);
+    }
+
+    private void logStatsIfDue(long now) {
+        if (shouldLogAgain(now, lastStatsLogAt, STATS_LOG_INTERVAL_MS)) {
+            logStats(now);
+            lastStatsLogAt = now;
+        }
+    }
+
+    private void logStats(long now) {
+        long runtimeSeconds = Math.max(0L, (now - scriptStartedAt) / 1_000L);
+        getLogger().info(
+                "STATS: runtime={}s | bought={} | deposited={} | hops={} | gp spent={} | "
+                        + "purchase failures={} | deposit failures={} | hop failures={} | recoveries={}",
+                runtimeSeconds,
+                hatsBought,
+                hatsDeposited,
+                successfulHops,
+                gpSpent,
+                failedPurchaseRequests,
+                failedDepositRequests,
+                failedHopRequests,
+                watchdogRecoveries);
+    }
+
     private int blackHatCount(APIContext ctx) {
         return ctx.inventory().getCount(BLACK_HAT_ID);
     }
@@ -649,6 +875,8 @@ public class WizardHatBuyer extends LoopScript {
     private boolean isSafeF2PWorld(World world, int current) {
         if (world == null || world.getId() == current || world.isMembers()) return false;
         if (recentWorlds.contains(world.getId())) return false;
+        long cooldownUntil = failedWorldUntil.getOrDefault(world.getId(), 0L);
+        if (worldOnCooldown(System.currentTimeMillis(), cooldownUntil)) return false;
 
         EnumSet<WorldType> types = world.getTypes();
         if (types == null) return true;
@@ -675,12 +903,15 @@ public class WizardHatBuyer extends LoopScript {
         if (state != next) {
             getLogger().info("STATE {} -> {} | {}", state, next, reason);
             state = next;
+            stateEnteredAt = System.currentTimeMillis();
+            lastWaitingLogAt = 0L;
             if (next == State.BUY_BLUE) shopOpenedAt = System.currentTimeMillis();
         }
     }
 
     @Override
     protected void onStop() {
+        logStats(System.currentTimeMillis());
         getLogger().info("Wizard Hat Buyer stopped");
     }
 }
