@@ -545,17 +545,20 @@ public class WizardHatBuyer extends LoopScript {
         if (target != null) {
             hopTargetWorld = target.getId();
             getLogger().info("HOP: clicking world {} -> {}", current, hopTargetWorld);
-            if (ctx.world().hop(hopTargetWorld)) {
+            boolean hopRequested = tryWorldHopActions(
+                    () -> ctx.world().hop(hopTargetWorld),
+                    () -> clickWorldSwitcherRow(ctx, hopTargetWorld));
+            if (hopRequested) {
                 lastHopActivityAt = System.currentTimeMillis();
                 hopArrivedAt = 0L;
-                setState(State.WAIT_WORLD, "explicit world hop clicked");
+                setState(State.WAIT_WORLD, "world hop requested");
                 return (int) HOP_ACTION_DELAY_MS;
             }
 
             // IMPORTANT: do NOT call hopToF2P() here.
             // EpicBot NXT's built-in F2P hopper can close/replace the current script instance.
             // Mark this target as temporarily skipped and try another explicit F2P world next loop.
-            getLogger().warn("HOP: explicit hop to {} returned false; trying a different F2P world", hopTargetWorld);
+            getLogger().warn("HOP: API and world-row click both rejected {}; trying another F2P world", hopTargetWorld);
             failedWorldUntil.put(hopTargetWorld, System.currentTimeMillis() + FAILED_WORLD_COOLDOWN_MS);
             consecutiveHopFailures++;
             failedHopRequests++;
@@ -568,6 +571,49 @@ public class WizardHatBuyer extends LoopScript {
         recentWorlds.clear();
         consecutiveHopFailures++;
         return hopRetryDelay(consecutiveHopFailures);
+    }
+
+    private boolean clickWorldSwitcherRow(APIContext ctx, int worldId) {
+        WidgetGroup worldSwitcher = ctx.widgets().get(WidgetID.WORLD_HOPPER_GROUP);
+        if (worldSwitcher == null || !worldSwitcher.isVisible()) return false;
+
+        List<WidgetChild> matches = ctx.widgets().getAllChildren(child ->
+                child != null
+                        && child.isValid()
+                        && child.getGroup() != null
+                        && child.getGroup().getIndex() == WidgetID.WORLD_HOPPER_GROUP
+                        && worldWidgetMatches(child.getText(), worldId));
+        if (matches == null || matches.isEmpty()) return false;
+
+        WidgetChild label = matches.get(0);
+        WidgetChild clickable = label;
+        String action = worldSwitchAction(clickable);
+        for (int depth = 0; action == null && clickable != null && depth < 6; depth++) {
+            clickable = clickable.getParent();
+            action = worldSwitchAction(clickable);
+        }
+
+        if (clickable == null) clickable = label;
+        WidgetChild scrollArea = worldSwitcher.getChild(10);
+        if (!ctx.widgets().isOnScreen(clickable) && scrollArea != null) {
+            ctx.widgets().scroll(clickable, scrollArea);
+        }
+
+        boolean clicked = action != null ? clickable.interact(action) : clickable.click();
+        if (clicked) {
+            getLogger().info("HOP: clicked world-switcher widget row for {}", worldId);
+        }
+        return clicked;
+    }
+
+    private static String worldSwitchAction(WidgetChild child) {
+        if (child == null || child.getActions() == null) return null;
+        return child.getActions().stream()
+                .filter(action -> action != null
+                        && (action.toLowerCase().contains("switch")
+                        || action.toLowerCase().contains("hop")))
+                .findFirst()
+                .orElse(null);
     }
 
     private int waitWorld(APIContext ctx) {
@@ -896,6 +942,19 @@ public class WizardHatBuyer extends LoopScript {
                 && fromWorld > 0
                 && currentWorld > 0
                 && currentWorld != fromWorld;
+    }
+
+    static boolean tryWorldHopActions(BooleanSupplier apiAction, BooleanSupplier widgetFallback) {
+        return apiAction.getAsBoolean() || widgetFallback.getAsBoolean();
+    }
+
+    static boolean worldWidgetMatches(String text, int targetWorld) {
+        if (text == null || targetWorld <= 0) return false;
+        String plainText = text.replaceAll("<[^>]*>", " ");
+        for (String token : plainText.split("\\D+")) {
+            if (!token.isEmpty() && Integer.parseInt(token) == targetWorld) return true;
+        }
+        return false;
     }
 
     static int hopRetryDelay(int consecutiveFailures) {
