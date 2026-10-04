@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongSupplier;
 
 @ScriptManifest(name = "Wizard Hat Buyer", gameType = GameType.OS)
 public class WizardHatBuyer extends LoopScript {
@@ -545,11 +546,14 @@ public class WizardHatBuyer extends LoopScript {
         if (target != null) {
             hopTargetWorld = target.getId();
             getLogger().info("HOP: clicking world {} -> {}", current, hopTargetWorld);
-            boolean hopRequested = tryWorldHopActions(
-                    () -> ctx.world().hop(hopTargetWorld),
-                    () -> clickWorldSwitcherRow(ctx, hopTargetWorld));
-            if (hopRequested) {
-                lastHopActivityAt = System.currentTimeMillis();
+            long completedRequestAt = completedHopRequestAt(
+                    () -> tryWorldHopActions(
+                            () -> ctx.world().hop(hopTargetWorld),
+                            () -> clickWorldSwitcherRow(ctx, hopTargetWorld)),
+                    System::currentTimeMillis);
+            if (completedRequestAt > 0L) {
+                hopRequestedAt = completedRequestAt;
+                lastHopActivityAt = completedRequestAt;
                 hopArrivedAt = 0L;
                 setState(State.WAIT_WORLD, "world hop requested");
                 return (int) HOP_ACTION_DELAY_MS;
@@ -946,6 +950,10 @@ public class WizardHatBuyer extends LoopScript {
 
     static boolean tryWorldHopActions(BooleanSupplier apiAction, BooleanSupplier widgetFallback) {
         return apiAction.getAsBoolean() || widgetFallback.getAsBoolean();
+    }
+
+    static long completedHopRequestAt(BooleanSupplier action, LongSupplier clock) {
+        return action.getAsBoolean() ? clock.getAsLong() : 0L;
     }
 
     static boolean worldWidgetMatches(String text, int targetWorld) {
