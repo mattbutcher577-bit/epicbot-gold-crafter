@@ -58,6 +58,8 @@ public class WizardHatBuyer extends LoopScript {
     private long lastHopActivityAt = 0L;
     private long scriptStartedAt = 0L;
     private int zeroCoinStableChecks = 0;
+    private long lastZeroCoinConfirmationAt = 0L;
+    private int lastKnownHatCount = 0;
     private long shopOpenedAt = 0L;
     private boolean bluePurchasePending = false;
     private int blueCountBeforePurchase = 0;
@@ -93,6 +95,7 @@ public class WizardHatBuyer extends LoopScript {
     private int blackPurchaseRetries = 0;
     private static final long COIN_GRACE_MS = 7_000L;
     private static final int ZERO_COIN_CONFIRMATIONS = 8;
+    private static final long ZERO_COIN_CONFIRMATION_INTERVAL_MS = 1_000L;
     private static final long SHOP_SETTLE_MS = 250L;
     private static final long PURCHASE_POLL_DELAY_MS = 60L;
     private static final long HOP_ACTION_DELAY_MS = 70L;
@@ -136,6 +139,8 @@ public class WizardHatBuyer extends LoopScript {
         stateEnteredAt = scriptStartedAt;
         lastHopActivityAt = scriptStartedAt;
         zeroCoinStableChecks = 0;
+        lastZeroCoinConfirmationAt = 0L;
+        lastKnownHatCount = 0;
         shopOpenedAt = 0L;
         bluePurchasePending = false;
         blackPurchasePending = false;
@@ -177,6 +182,8 @@ public class WizardHatBuyer extends LoopScript {
         // so never trust a single zero-coin read.
         long now = System.currentTimeMillis();
         int coins = ctx.inventory().getCount("Coins");
+        int hats = hatCount(ctx);
+        if (hats > 0) lastKnownHatCount = hats;
         boolean hopOrLoadGrace =
                 state == State.HOP_WORLD
                         || state == State.WAIT_WORLD
@@ -191,12 +198,17 @@ public class WizardHatBuyer extends LoopScript {
 
         if (coins > 0) {
             zeroCoinStableChecks = 0;
-        } else if (shouldIgnoreZeroCoins(hopOrLoadGrace, inventoryMayBeHidden)) {
+            lastZeroCoinConfirmationAt = 0L;
+        } else if (shouldIgnoreZeroCoins(hopOrLoadGrace, inventoryMayBeHidden)
+                || !coinStopSnapshotUsable(hats, lastKnownHatCount)) {
             // Ignore transient empty inventory while hopping/loading.
             zeroCoinStableChecks = 0;
+            lastZeroCoinConfirmationAt = 0L;
             logWaiting("COINS: zero ignored while inventory may be hidden | state={}", state);
-        } else {
+        } else if (shouldRecordZeroCoinConfirmation(
+                now, lastZeroCoinConfirmationAt, ZERO_COIN_CONFIRMATION_INTERVAL_MS)) {
             zeroCoinStableChecks++;
+            lastZeroCoinConfirmationAt = now;
             getLogger().warn("COINS: zero check {}/{} - confirming before stop",
                     zeroCoinStableChecks, ZERO_COIN_CONFIRMATIONS);
 
@@ -822,6 +834,7 @@ public class WizardHatBuyer extends LoopScript {
         }
 
         ctx.bank().close();
+        lastKnownHatCount = 0;
         keepCoinsInFirstSlot(ctx);
         forceTradeAfterHop = true;
         forcedShopCloseSent = false;
@@ -971,6 +984,14 @@ public class WizardHatBuyer extends LoopScript {
 
     static boolean shouldIgnoreZeroCoins(boolean hopOrLoadGrace, boolean inventoryMayBeHidden) {
         return hopOrLoadGrace || inventoryMayBeHidden;
+    }
+
+    static boolean coinStopSnapshotUsable(int currentHatCount, int lastKnownHatCount) {
+        return currentHatCount > 0 || lastKnownHatCount <= 0;
+    }
+
+    static boolean shouldRecordZeroCoinConfirmation(long now, long lastConfirmationAt, long intervalMs) {
+        return lastConfirmationAt <= 0L || now - lastConfirmationAt >= intervalMs;
     }
 
     static boolean shouldLogAgain(long now, long lastLogAt, long intervalMs) {
