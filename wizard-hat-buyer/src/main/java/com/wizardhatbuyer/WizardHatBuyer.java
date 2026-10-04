@@ -493,7 +493,7 @@ public class WizardHatBuyer extends LoopScript {
 
     private int hopWorld(APIContext ctx) {
         if (hatCount(ctx) >= DEPOSIT_THRESHOLD || ctx.inventory().isFull()) {
-            if (ctx.store().isOpen() && !ctx.world().isWorldMenuOpen()) ctx.store().close();
+            if (ctx.store().isOpen() && !worldMenuVisible(ctx)) ctx.store().close();
             setState(State.WALK_DEPOSIT, "world cycle complete; inventory ready to deposit");
             return 140;
         }
@@ -514,7 +514,7 @@ public class WizardHatBuyer extends LoopScript {
         // EpicBot NXT can leave the shop-open flag stale after closing Betty's shop.
         // The previous build kept calling store.close() forever even though the
         // world switcher was already on screen.
-        if (ctx.world().isWorldMenuOpen()) {
+        if (worldMenuVisible(ctx)) {
             getLogger().info("HOP: world menu ready on world {}", current);
         } else {
             if (ctx.store().isOpen()) {
@@ -668,7 +668,7 @@ public class WizardHatBuyer extends LoopScript {
         }
 
         // If the world menu closed but the world did not change, try another explicit target quickly.
-        if (!ctx.world().isWorldMenuOpen()
+        if (!worldMenuVisible(ctx)
                 && hopRequestedAt > 0L
                 && now - hopRequestedAt > WORLD_UNCHANGED_RETRY_MS) {
             getLogger().warn("HOP: menu closed but still on {}; retrying another world", current);
@@ -967,6 +967,17 @@ public class WizardHatBuyer extends LoopScript {
 
     static long completedHopRequestAt(BooleanSupplier action, LongSupplier clock) {
         return action.getAsBoolean() ? clock.getAsLong() : 0L;
+    }
+
+    private boolean worldMenuVisible(APIContext ctx) {
+        WidgetGroup worldSwitcher = ctx.widgets().get(WidgetID.WORLD_HOPPER_GROUP);
+        return isWorldMenuVisible(
+                ctx.world().isWorldMenuOpen(),
+                worldSwitcher != null && worldSwitcher.isVisible());
+    }
+
+    static boolean isWorldMenuVisible(boolean apiMenuOpen, boolean worldWidgetVisible) {
+        return apiMenuOpen || worldWidgetVisible;
     }
 
     static boolean worldWidgetMatches(String text, int targetWorld) {
